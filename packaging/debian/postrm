@@ -32,6 +32,8 @@ case "$1" in
         fi
         rm -f /etc/udev/rules.d/99-lintask-rapl.rules
         rm -rf /usr/share/lintask /opt/lintask
+        # The history of the service; with DynamicUser it lives under private/.
+        rm -rf /var/lib/private/lintask /var/lib/lintask
         ;;
 esac
 

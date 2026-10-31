@@ -12,7 +12,11 @@ import urllib.request
 
 from PySide6.QtCore import QThread, Signal
 
+from app.history import validate_payload
 from app.i18n import current_language, tr
+
+# Far more than the largest real answer, which is a few hundred kilobytes.
+MAX_HISTORY_BYTES = 4 * 1024 * 1024
 
 
 def _http_error_text(error: urllib.error.HTTPError) -> str:
@@ -23,6 +27,47 @@ def _http_error_text(error: urllib.error.HTTPError) -> str:
         return tr(json.loads(error.read().decode("utf-8"))["error"])
     except (OSError, ValueError, KeyError, TypeError):
         return tr("HTTP error {code}", code=error.code)
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, *args, **kwargs):
+        return None
+
+
+# The token goes only to the server the user entered: urlopen would also send it through
+# a proxy from the environment and on to the target of a redirect.
+_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect)
+
+
+def fetch_snapshot(host: str, port: int, token: str, timeout: float) -> dict:
+    request = urllib.request.Request(
+        f"http://{host}:{port}/api/v1/snapshot",
+        headers={"Authorization": f"Bearer {token}"} if token else {},
+    )
+    with _OPENER.open(request, timeout=timeout) as response:
+        return json.loads(response.read().decode("utf-8"))
+
+
+def fetch_history(host: str, port: int, token: str, seconds: int, timeout: float = 10.0) -> dict:
+    """The server's history, checked. Everything that goes wrong on the server's side
+    arrives as a ValueError with a text for the user."""
+    request = urllib.request.Request(
+        f"http://{host}:{port}/api/v1/history?seconds={int(seconds)}",
+        headers={"Authorization": f"Bearer {token}"} if token else {},
+    )
+    try:
+        with _OPENER.open(request, timeout=timeout) as response:
+            body = response.read(MAX_HISTORY_BYTES + 1)
+    except urllib.error.HTTPError as error:
+        if error.code == 404:
+            raise ValueError(tr("The server is too old for the history; please update it")) from None
+        raise ValueError(_http_error_text(error)) from None
+    if len(body) > MAX_HISTORY_BYTES:
+        raise ValueError(tr("The server sent an invalid history"))
+    try:
+        return validate_payload(json.loads(body.decode("utf-8")))
+    except (ValueError, RecursionError):
+        raise ValueError(tr("The server sent an invalid history")) from None
 
 
 class RemoteSnapshotWorker(QThread):
@@ -44,12 +89,8 @@ class RemoteSnapshotWorker(QThread):
     def run(self) -> None:
         while self._running:
             try:
-                request = urllib.request.Request(
-                    f"http://{self.host}:{self.port}/api/v1/snapshot",
-                    headers={"Authorization": f"Bearer {self.token}"} if self.token else {},
-                )
-                with urllib.request.urlopen(request, timeout=min(2.0, self.interval + 1.0)) as response:
-                    payload = json.loads(response.read().decode("utf-8"))
+                payload = fetch_snapshot(self.host, self.port, self.token,
+                                         timeout=min(2.0, self.interval + 1.0))
                 self.snapshotReady.emit(payload)
             except urllib.error.HTTPError as exc:
                 self.connectionError.emit(_http_error_text(exc))

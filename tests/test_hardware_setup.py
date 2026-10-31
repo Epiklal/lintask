@@ -62,6 +62,24 @@ class TestSudoRule(unittest.TestCase):
         self.assertNotIn("-m 0755", self.script(PACKAGED_HELPERS[0]))
         self.assertIn(f"-m 0755 /src/helper {HELPER_TARGET}", self.script(HELPER_TARGET))
 
+    def test_helper_gets_the_interpreter_of_a_system_without_bin_bash(self):
+        bash = "/run/current-system/sw/bin/bash"
+        with mock.patch.object(hardware_setup, "_system_binary", return_value=bash):
+            script = self.script()
+        expression = f"1s|.*|#!{bash} -p|"
+        self.assertIn(f"[ -x /bin/bash ] || sudo sed -i {shlex.quote(expression)} {HELPER_TARGET}",
+                      script)
+        with tempfile.TemporaryDirectory() as directory:
+            copy = Path(directory) / "helper"
+            copy.write_text(HELPER.read_text())
+            subprocess.run(["sed", "-i", expression, str(copy)], check=True)
+            before, after = HELPER.read_text().split("\n", 1), copy.read_text().split("\n", 1)
+        self.assertEqual(after[0], f"#!{bash} -p")
+        self.assertEqual(after[1], before[1])
+
+    def test_packaged_helper_keeps_its_interpreter(self):
+        self.assertNotIn("sudo sed -i", self.script(PACKAGED_HELPERS[0]))
+
     def test_paths_and_names_are_shell_quoted(self):
         source = "/home/a b/$(touch pwned)/helper"
         group = "a b;touch pwned"
@@ -157,6 +175,11 @@ class TestRaplRule(unittest.TestCase):
         steps = hardware_setup._rapl_steps("alice")
         install = next(i for i, step in enumerate(steps) if f"{RAPL_UDEV_TARGET}; then" in step)
         self.assertEqual(steps[install + 1].strip(), f"sudo rm -f {LEGACY_RAPL_UDEV}")
+
+    def test_side_channel_is_named_once_the_counters_are_open(self):
+        script = "\n".join(hardware_setup._rapl_steps("alice"))
+        self.assertLess(script.index("sudo chmod g+r"), script.index("CVE-2020-8694"))
+        self.assertLess(script.index("CVE-2020-8694"), script.index("/etc/NIXOS"))
 
 
 class TestHelperScript(unittest.TestCase):
@@ -255,6 +278,28 @@ class TestHelperScript(unittest.TestCase):
         if os.getuid() == 0:
             self.skipTest("would really empty the cache")
         self.assertEqual(self.run_helper("drop-caches").returncode, 3)
+
+    def test_environment_of_the_caller_decides_nothing(self):
+        # sudo without secure_path passes on PATH. Started directly, so the shebang counts.
+        if not os.access("/bin/bash", os.X_OK):
+            self.skipTest("no /bin/bash")
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        root = Path(directory.name)
+        marker = root / "caller-code-ran"
+        for tool in ("bash", "sync"):
+            write_executable(root / tool, f'#!/bin/sh\ntouch "{marker}"\n')
+        write_executable(root / "bash_env", f'touch "{marker}"\n')
+        target = root / "drop_caches"
+        script = root / "helper"
+        write_executable(script, HELPER.read_text().replace("/proc/sys/vm/drop_caches", str(target)))
+        result = subprocess.run(
+            [str(script), "drop-caches"], capture_output=True, text=True,
+            env={"PATH": str(root), "BASH_ENV": str(root / "bash_env"),
+                 "BASH_FUNC_sync%%": f'() {{ touch "{marker}"; }}'})
+        self.assertFalse(marker.exists())
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(target.read_text(), "3\n")
 
 
 if __name__ == "__main__":

@@ -25,7 +25,7 @@ class TestStartup(unittest.TestCase):
     def test_main_window_constructs_and_shows(self):
         window = MainWindow()
         window.show()
-        self.assertEqual(window.tabs.count(), 9)
+        self.assertEqual(window.tabs.count(), 10)
         window.close()
 
     def test_main_window_closes_without_leftover_worker_threads(self):

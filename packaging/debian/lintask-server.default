@@ -3,13 +3,16 @@
 # After changes here:    sudo systemctl restart lintask-server
 #
 # Available options (all optional):
-#   --token TOKEN       fixed access token that the desktop app enters when connecting.
-#                       Without --token a new token is generated at every start and
-#                       written to the journal:  journalctl -u lintask-server
+#   --port and the others below go into LINTASK_SERVER_OPTS.
+#   LINTASK_SERVER_TOKEN is a variable of its own: a fixed access token that the desktop
+#                       app enters when connecting. Unlike --token it does not show up in
+#                       the process list. Without a token a new one is generated at every
+#                       start and written to the journal:  journalctl -u lintask-server
 #   --port 8765         port (default 8765)
 #   --host 0.0.0.0      address to listen on (default: all)
 #   --no-auth           no access token - only on trusted networks!
 #
 # Example:
-#LINTASK_SERVER_OPTS="--token PLEASE-CHANGE --port 8765"
+#LINTASK_SERVER_TOKEN=PLEASE-CHANGE
+#LINTASK_SERVER_OPTS="--port 8765"
 LINTASK_SERVER_OPTS=""

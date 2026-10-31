@@ -112,6 +112,14 @@ class Settings:
         self._store.setValue("remote_host", value)
 
     @property
+    def history_enabled(self) -> bool:
+        return self._store.value("history_enabled", True, type=bool)
+
+    @history_enabled.setter
+    def history_enabled(self, value: bool) -> None:
+        self._store.setValue("history_enabled", value)
+
+    @property
     def remote_enabled(self) -> bool:
         return self._store.value("remote_enabled", False, type=bool)
 

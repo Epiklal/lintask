@@ -69,6 +69,8 @@ The screenshots show the German interface.
   a lot of it, and ending a program or moving it to swap on request. Nothing happens
   automatically. A data view lists everything else: kernel figures, swap devices, every
   module and the module temperatures.
+- **History** of CPU, memory, swap, disks, network, temperatures and GPU, kept for up to a
+  year in a small local file. Also shows the history of a server in remote mode.
 - **Performance** graphs for CPU (overall or per logical processor), memory, every
   physical disk, network (auto-scaled, send/receive) and GPU (selectable engines,
   dedicated and shared memory).
@@ -127,6 +129,7 @@ installer needs an internet connection for this download.
 | `<project folder>/.venv/` | Virtual environment with the Python packages |
 | `~/.local/share/applications/lintask.desktop` | **Lintask** entry in your application menu |
 | `~/.config/Lintask/TaskManager.conf` | Your settings (created on first start, readable only by you) |
+| `~/.local/state/Lintask/history.sqlite3` | The recorded history (created on first start, readable only by you) |
 
 Nothing else is changed on your system. The optional **Settings →
 Set up hardware data with sudo** button additionally installs a small
@@ -143,8 +146,10 @@ Memory tab. The button also makes the CPU energy counters
 for your user group, right away and on every boot through a udev rule
 (`/etc/udev/rules.d/99-lintask-rapl.rules`, works with systemd-udevd and
 eudev). Since Linux 5.10 the kernel makes them readable only by root (because of
-the PLATYPUS side channel), so without this the CPU power draw (and on Intel the
-iGPU power draw) shows *Keine Leseberechtigung*. On NixOS `/etc` is read-only: the
+the PLATYPUS side channel, CVE-2020-8694: programs that can read the counters may be
+able to derive secrets from them), so without this the CPU power draw (and on Intel the
+iGPU power draw) shows *Keine Leseberechtigung*. The unlock applies to every program of
+your user group, so skip the setup if you run untrusted code under that group. On NixOS `/etc` is read-only: the
 setup unlocks the counters until the next reboot and prints the
 `services.udev.extraRules` line to add to `/etc/nixos/configuration.nix`.
 
@@ -479,11 +484,12 @@ Debian package:
 sudo apt purge lintask     # or "apt remove" to keep /etc/default/lintask-server
 sudo apt autoremove        # drops the recommended tools if nothing else needs them
 rm -r ~/.config/Lintask    # optional: your settings
+rm -r ~/.local/state/Lintask   # optional: your history
 ```
 
 Both `remove` and `purge` delete `/opt/lintask` (the PySide6 virtual
-environment on Ubuntu/Linux Mint). `purge` also removes the server configuration, the
-sudo rule for the packaged helper and the RAPL udev rule; the service is stopped and
+environment on Ubuntu/Linux Mint). `purge` also removes the server configuration, the history the
+service recorded, the sudo rule for the packaged helper and the RAPL udev rule; the service is stopped and
 disabled automatically.
 
 Arch package:
@@ -491,6 +497,8 @@ Arch package:
 ```bash
 sudo pacman -R lintask     # or "pacman -Rs" to drop unneeded dependencies too
 rm -r ~/.config/Lintask    # optional: your settings
+rm -r ~/.local/state/Lintask   # optional: your history
+sudo rm -r /var/lib/private/lintask   # optional: the history the service recorded
 ```
 
 This also stops and disables the service and removes the sudo rule for the packaged
@@ -501,7 +509,7 @@ Installer script:
 
 ```bash
 rm ~/.local/share/applications/lintask.desktop
-rm -r ~/.config/Lintask
+rm -r ~/.config/Lintask ~/.local/state/Lintask
 rm -r lintask      # the project folder, including .venv
 ```
 
@@ -519,6 +527,7 @@ If you set up the server as a systemd service (see below), stop and remove it to
 ```bash
 sudo systemctl disable --now lintask-server
 sudo rm /etc/systemd/system/lintask-server.service
+sudo rm -r /var/lib/private/lintask   # the history the service recorded
 ```
 
 The system packages from the table above stay installed; remove them with your
@@ -579,6 +588,39 @@ emptied without you asking for it.
 - **Emptying the cache** is off unless you tick *Offer to empty the cache*, and it warns
   you before it runs. It rarely helps: programs and files load more slowly until the
   cache has filled up again. It needs the same setup.
+
+### History
+
+Shows how the computer was doing, from the last hour up to the last year: CPU, memory and
+swap, how full the root file system is, disk and network throughput, temperatures and
+GPU. Recording starts with Lintask and can be switched off with *Record this computer's
+history*; **Delete history** removes everything recorded so far.
+
+Lintask takes one sample every 10 seconds and thins the data out as it gets older:
+
+| Age | One value per |
+|---|---|
+| Up to 24 hours | 10 seconds |
+| Up to 30 days | 5 minutes |
+| Up to 1 year | 1 hour |
+
+Coarser values keep both the average (the line) and the peak (the band around it), so a
+short load is still visible a month later. Only totals are stored, no process names or
+command lines. The file stays around 8 to 12 MB (measured with a full year of data) at
+`~/.local/state/Lintask/history.sqlite3`.
+
+What to keep in mind:
+
+- Lintask records only while it runs. Time it wasn't running stays empty and shows as a
+  gap, never as a line across it.
+- Anything shorter than 10 seconds is smoothed out; the graphs of the **Performance** tab
+  are the place to watch short spikes.
+- The views that use 5-minute or hourly values end at the last finished one, so the
+  newest few minutes appear there a little later.
+
+In remote mode the tab shows the server's history, read from the server's own file. The
+service records to `/var/lib/lintask/history.sqlite3`; start the server with `--no-history`
+to turn that off.
 
 ### Performance
 
@@ -726,11 +768,11 @@ Press Ctrl+C to quit
 | --- | --- | --- |
 | `--host ADDRESS` | `0.0.0.0` (all network interfaces) | Address to listen on; use `127.0.0.1` for local/SSH-tunnel access only |
 | `--port PORT` | `8765` | TCP port |
-| `--token TOKEN` | *random* | Use your own access token instead of a random one |
+| `--token TOKEN` | *random* | Use your own access token instead of a random one. Visible to all users in the process list, so prefer the environment variable `LINTASK_SERVER_TOKEN` |
 | `--generate-token` | *(default behavior)* | Generate a random token; kept for compatibility |
 | `--no-auth` | off | Start **without** a token. Anyone who can reach the port can read all data and start benchmarks - only for trusted networks |
 
-Without `--token`, a **new random token is generated on every start**. For a server
+Without a token of your own, a **new random token is generated on every start**. For a server
 that runs permanently, use a fixed token (see step 4).
 
 If a firewall is active, open the port, e.g. `sudo ufw allow 8765/tcp`.
@@ -763,7 +805,7 @@ but not enabled. Put the token into `/etc/default/lintask-server` (readable by r
 only) and enable the service:
 
 ```bash
-sudoedit /etc/default/lintask-server     # LINTASK_SERVER_OPTS="--token YOUR_TOKEN"
+sudoedit /etc/default/lintask-server     # LINTASK_SERVER_TOKEN=YOUR_TOKEN
 sudo systemctl enable --now lintask-server
 systemctl status lintask-server
 ```
@@ -788,7 +830,7 @@ then restart it with `sudo systemctl restart lintask-server` and set up the
 helper and sudo rule for that user (see the end of this section).
 
 **Installer script:** create `/etc/systemd/system/lintask-server.service`
-(adjust the path, user and token):
+(adjust the path and user):
 
 ```ini
 [Unit]
@@ -798,18 +840,20 @@ Wants=network-online.target
 
 [Service]
 User=youruser
-ExecStart=/home/youruser/lintask/run.sh --server --token YOUR_TOKEN
+EnvironmentFile=/etc/default/lintask-server
+ExecStart=/home/youruser/lintask/run.sh --server
 Restart=on-failure
 
 [Install]
 WantedBy=multi-user.target
 ```
 
-Because the file contains the token, make it readable by root only and start the
-service:
+Unit files are readable by every user, so the token goes into a file of its own that
+only root can read. Enter `LINTASK_SERVER_TOKEN=YOUR_TOKEN` there and start the service:
 
 ```bash
-sudo chmod 600 /etc/systemd/system/lintask-server.service
+sudo install -m 0600 /dev/null /etc/default/lintask-server
+sudoedit /etc/default/lintask-server
 sudo systemctl daemon-reload
 sudo systemctl enable --now lintask-server
 ```
@@ -832,6 +876,9 @@ All requests need the header `Authorization: Bearer <token>` (unless `--no-auth`
 # Full snapshot as JSON
 curl -H "Authorization: Bearer $TOKEN" http://SERVER:8765/api/v1/snapshot
 
+# History of the last 24 hours (60 to 31536000 seconds)
+curl -H "Authorization: Bearer $TOKEN" "http://SERVER:8765/api/v1/history?seconds=86400"
+
 # Run a benchmark ("cpu", "memory", "gpu" or "disk")
 curl -H "Authorization: Bearer $TOKEN" \
      -d '{"kind": "cpu", "cpu_threads": 4, "cpu_seconds": 10}' \
@@ -840,8 +887,15 @@ curl -H "Authorization: Bearer $TOKEN" \
 
 The snapshot contains `version`, `timestamp`, `hostname`, `system` (CPU, memory,
 network, uptime), `cpu_model`, `gpu`, `processes`, `sensors`, `services`, `docker`,
-`docker_error`, `autostart` and `disks`. Error answers: `401` wrong or missing token,
-`409` a benchmark is already running, `413` request too large, `400` invalid request.
+`docker_error`, `autostart` and `disks`.
+
+The history contains `seconds`, `step` (seconds per row), `now`, `columns` and `rows`, at
+most about 720 rows, oldest first. Each row starts with the time, followed by the average
+and the peak of each value (`cpu_avg`, `cpu_max`, ...). Rows without data are left out and
+values that weren't available are `null`.
+
+Error answers: `401` wrong or missing token, `409` a benchmark is already running, `413`
+request too large, `400` invalid request, `503` this server records no history.
 
 ## Benchmarks
 
@@ -916,14 +970,23 @@ LiveChart {
 ## Security
 
 - The settings file (including the server token) is readable only by your user.
+- The history file is readable only by its owner and holds system totals, no process
+  names. On a server, anyone with the token can read it through the API.
 - The server always requires an access token unless started with `--no-auth`;
   tokens are compared in constant time.
 - Remote mode never runs actions on your local machine for data that comes from the
   server.
 - Autostart changes only ever touch `.desktop` files in the XDG autostart folders.
-- The optional SMART helper validates the device name and can only read SMART and
-  memory data.
-- The server connection uses plain HTTP. On networks you do not trust, start the
+- The optional SMART helper runs as root through sudo. It ignores the caller's
+  environment and validates its arguments. It can read SMART and memory data, move the
+  memory of your own processes to swap, and empty the page cache.
+- A token of your own belongs into `LINTASK_SERVER_TOKEN`: `--token` is visible to all
+  users in the process list. A token you chose is not printed at startup.
+- The client sends the token only to the server you entered: it ignores proxies and
+  does not follow redirects.
+- The server connection uses plain HTTP, so the data and the token can be read on the
+  network path; the server warns about this at startup unless it only listens on
+  loopback. On networks you do not trust, start the
   server with `--host 127.0.0.1` and connect through an SSH tunnel, then use
   `127.0.0.1` as the server IP in the settings:
 
@@ -948,6 +1011,7 @@ Project layout:
 | `app/themes.py` | Color schemes; a new scheme only needs a few base colors plus five chart colors |
 | `app/system_info.py` | All data collection (processes, hardware, disks, GPU, Docker, autostart) |
 | `app/remote_server.py`, `app/remote_client.py` | Server mode and its client |
+| `app/history.py` | History: SQLite store, sampling and recording, free of Qt |
 | `app/settings.py` | Persisted settings |
 | `pages/` | One module per tab |
 | `widgets/` | Graphs, performance tiles, Windows 11 navigation pane, tables |
@@ -968,8 +1032,8 @@ Push a tag that starts with `v`. GitHub Actions then builds the package with
 publishes a GitHub Release with the `.deb` attached:
 
 ```bash
-git tag v1.0.1
-git push origin v1.0.1
+git tag v1.1.0
+git push origin v1.1.0
 ```
 
 Every push to `main` and every manual run (**Actions** tab → *Build .deb* → *Run

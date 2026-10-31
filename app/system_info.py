@@ -1472,7 +1472,10 @@ class DockerWorker(StoppableWorker):
         except (subprocess.TimeoutExpired, OSError) as exc:
             return [], str(exc)
 
-        containers = [json.loads(line) for line in ps_out.splitlines() if line.strip()]
+        try:
+            containers = [json.loads(line) for line in ps_out.splitlines() if line.strip()]
+        except ValueError as exc:
+            return [], str(exc)
 
         stats: dict[str, dict] = {}
         try:
@@ -1484,7 +1487,8 @@ class DockerWorker(StoppableWorker):
                 if line.strip():
                     entry = json.loads(line)
                     stats[entry["ID"]] = entry
-        except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError):
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError,
+                ValueError, KeyError, TypeError):
             pass  # no running containers, or `docker stats` unsupported - CPU/Mem stay 0
 
         has_gpu_backend = self._gpu_monitor.available()
@@ -1498,8 +1502,11 @@ class DockerWorker(StoppableWorker):
             stat = stats.get(cid)
             cpu = mem_mb = mem_limit_mb = mem_percent = 0.0
             if stat:
-                cpu = float((stat.get("CPUPerc") or "0%").rstrip("%") or 0)
-                mem_percent = float((stat.get("MemPerc") or "0%").rstrip("%") or 0)
+                try:
+                    cpu = float((stat.get("CPUPerc") or "0%").rstrip("%") or 0)
+                    mem_percent = float((stat.get("MemPerc") or "0%").rstrip("%") or 0)
+                except ValueError:
+                    pass  # docker prints "--" while a container starts or stops
                 usage_parts = (stat.get("MemUsage") or "0B / 0B").split("/")
                 if len(usage_parts) == 2:
                     mem_mb = _parse_mem_to_mb(usage_parts[0])

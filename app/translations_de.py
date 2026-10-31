@@ -305,20 +305,26 @@ GERMAN = {
     "A benchmark is already running on the server": "Auf dem Server läuft bereits ein Benchmark",
     "Lintask server running on http://{host}:{port}": "Lintask Server läuft auf http://{host}:{port}",
     "Access token: {token}": "Zugriffsschlüssel: {token}",
+    "Access token: your own (not shown)": "Zugriffsschlüssel: dein eigener (nicht angezeigt)",
+    "Could not read the system data": "Die Systemdaten konnten nicht gelesen werden",
+    "WARNING: The connection is not encrypted. Anyone on the network path can read the data and the access token. On untrusted networks start with --host 127.0.0.1 and connect through an SSH tunnel.": "WARNUNG: Die Verbindung ist nicht verschlüsselt. Jeder auf dem Netzwerkpfad kann die Daten und den Zugriffsschlüssel mitlesen. In nicht vertrauenswürdigen Netzen mit --host 127.0.0.1 starten und über einen SSH-Tunnel verbinden.",
+    "WARNING: The access token is shorter than {length} characters and easy to guess.": "WARNUNG: Der Zugriffsschlüssel ist kürzer als {length} Zeichen und leicht zu erraten.",
     "WARNING: Server is running WITHOUT an access token (--no-auth). Anyone who can reach this port can read all data and start benchmarks.": "WARNUNG: Server läuft OHNE Zugriffsschlüssel (--no-auth). Jeder, der diesen Port erreicht, kann alle Daten lesen und Benchmarks starten.",
     "Press Ctrl+C to quit": "Beenden mit Strg+C",
     "\nServer is shutting down.": "\nServer wird beendet.",
     "Lintask monitoring server": "Lintask Monitoring-Server",
-    "Your own bearer token (otherwise one is generated)": "Eigener Bearer-Schlüssel (sonst wird einer erzeugt)",
+    "Your own bearer token, visible to all users in the process list; better set {variable} (otherwise one is generated)": "Eigener Bearer-Schlüssel, für alle Benutzer in der Prozessliste sichtbar; besser {variable} setzen (sonst wird einer erzeugt)",
     "Generate a random access token (default)": "Zufälligen Zugriffsschlüssel erzeugen (Standard)",
     "Start without an access token (only on trusted networks!)": "Ohne Zugriffsschlüssel starten (nur in vertrauenswürdigen Netzen!)",
     "--no-auth and --token are mutually exclusive": "--no-auth und --token schließen sich aus",
+    "--no-auth and {variable} are mutually exclusive": "--no-auth und {variable} schließen sich aus",
     # Hardware setup
     "No RAPL energy counter found: the kernel offers no power reading for this CPU.": "Kein RAPL-Energiezähler gefunden: der Kernel bietet für diese CPU keine Leistungsaufnahme an.",
     "Done until the next reboot. To make it permanent, add this to /etc/nixos/configuration.nix:": "Fertig bis zum nächsten Neustart. Für dauerhaft in /etc/nixos/configuration.nix eintragen:",
     "Done until the next reboot (no udev available, so no permanent rule).": "Fertig bis zum nächsten Neustart (kein udev vorhanden, daher keine dauerhafte Regel).",
     "Done: the CPU power draw can now be read.": "Fertig: Die CPU-Leistungsaufnahme kann jetzt gelesen werden.",
     "Done until the next reboot - the udev rule could not be installed.": "Fertig bis zum nächsten Neustart - die udev-Regel konnte nicht installiert werden.",
+    "Note: the CPU energy counters are now readable for your user group. The kernel restricts them because they can leak secrets through a side channel (PLATYPUS, CVE-2020-8694).": "Hinweis: Die CPU-Energiezähler sind jetzt für deine Benutzergruppe lesbar. Der Kernel schränkt sie ein, weil über diesen Seitenkanal Geheimnisse abfließen können (PLATYPUS, CVE-2020-8694).",
     "The CPU power reading could not be enabled.": "CPU-Leistungsaufnahme konnte nicht freigegeben werden.",
     "Warning: smartmontools/dmidecode could not be installed - please install them with your package manager.": "Warnung: smartmontools/dmidecode konnten nicht installiert werden - bitte mit der Paketverwaltung nachinstallieren.",
     "Unknown package manager: please install smartmontools and dmidecode yourself.": "Unbekannte Paketverwaltung: bitte smartmontools und dmidecode selbst installieren.",
@@ -375,4 +381,40 @@ GERMAN = {
     "Only shown for this PC": "Nur für diesen PC sichtbar",
     "Needs \"Set up hardware data with sudo\" under Settings":
         "Braucht „Hardwaredaten mit sudo einrichten“ unter Einstellungen",
+
+    # History
+    "History": "Verlauf",
+    "This server does not record a history": "Dieser Server zeichnet keinen Verlauf auf",
+    "Invalid history range": "Ungültiger Zeitraum für den Verlauf",
+    "Could not read the history": "Der Verlauf konnte nicht gelesen werden",
+    "Do not record a history of the system values":
+        "Keinen Verlauf der Systemwerte aufzeichnen",
+    "The server is too old for the history; please update it":
+        "Der Server ist zu alt für den Verlauf; bitte aktualisiere ihn",
+    "The server sent an invalid history": "Der Server hat einen ungültigen Verlauf geschickt",
+    "{name}: average {average}, peak {peak}": "{name}: Durchschnitt {average}, Spitze {peak}",
+    "1 hour": "1 Stunde",
+    "6 hours": "6 Stunden",
+    "24 hours": "24 Stunden",
+    "7 days": "7 Tage",
+    "30 days": "30 Tage",
+    "1 year": "1 Jahr",
+    "Disk activity": "Datenträgeraktivität",
+    "Disk space": "Speicherplatz",
+    "Temperatures": "Temperaturen",
+    "Period:": "Zeitraum:",
+    "Record this computer's history": "Verlauf dieses Computers aufzeichnen",
+    "Delete history": "Verlauf löschen",
+    "Server: {host}": "Server: {host}",
+    "This computer": "Dieser Computer",
+    "The history file can't be used, so nothing is recorded.":
+        "Die Verlaufsdatei ist nicht nutzbar, deshalb wird nichts aufgezeichnet.",
+    "Could not load the history: {error}": "Der Verlauf konnte nicht geladen werden: {error}",
+    "Nothing recorded for this period yet. Lintask records every {seconds} seconds while it is running.":
+        "Für diesen Zeitraum ist noch nichts aufgezeichnet. Lintask zeichnet alle {seconds} "
+        "Sekunden auf, solange es läuft.",
+    "Recording is switched off: no new values are added.":
+        "Die Aufzeichnung ist ausgeschaltet: Es kommen keine neuen Werte hinzu.",
+    "Do you really want to delete the whole history of this computer?":
+        "Möchtest du wirklich den gesamten Verlauf dieses Computers löschen?",
 }

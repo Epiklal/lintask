@@ -20,6 +20,9 @@ RestartSec=5
 #     DynamicUser=no
 #     User=yourname
 DynamicUser=yes
+# Where the history is kept (/var/lib/lintask); start with --no-history to record nothing.
+StateDirectory=lintask
+StateDirectoryMode=0700
 
 [Install]
 WantedBy=multi-user.target

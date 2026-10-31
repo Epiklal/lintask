@@ -1,5 +1,11 @@
-#!/usr/bin/env bash
+#!/bin/bash -p
 set -eu
+
+# This runs as root through sudo, so nothing from the caller's environment may decide what
+# gets executed: an absolute interpreter, -p ignores BASH_ENV and inherited functions, and
+# a fixed PATH, for systems whose sudoers has no secure_path.
+PATH=/usr/sbin:/usr/bin:/sbin:/bin:/run/current-system/sw/bin
+export PATH
 
 if [[ "${1:-}" == "memory" ]]; then
     # /usr/sbin on most distributions, /usr/bin on merged-/usr systems like Arch.

@@ -2,16 +2,20 @@
 from __future__ import annotations
 
 import argparse
+import ipaddress
 import json
 import os
 import secrets
 import socket
+import sqlite3
 import subprocess
 import threading
 import time
+import traceback
 from dataclasses import asdict
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+from app.history import HistoryService, parse_range_query
 from app.i18n import N_, language_override, tr
 
 DEFAULT_HOST = "0.0.0.0"
@@ -23,6 +27,11 @@ MAX_PRIME_LIMIT = 10_000_000
 _BENCHMARK_LABELS = {"cpu": N_("CPU"), "memory": N_("Memory"), "gpu": N_("GPU"), "disk": N_("Disk")}
 # Clients from before the language switch send no language and expect German.
 _LEGACY_CLIENT_LANGUAGE = "de"
+# Parallel clients share one collection instead of each starting their own.
+SNAPSHOT_CACHE_SECONDS = 0.25
+# Read instead of --token, because a command line is visible to every user in `ps`.
+TOKEN_ENV = "LINTASK_SERVER_TOKEN"
+MIN_TOKEN_LENGTH = 16
 
 
 class BenchmarkBusyError(Exception):
@@ -71,11 +80,46 @@ def make_benchmark_runner(list_disks, worker_class):
     return run_benchmark
 
 
+def shared_snapshot(collect, max_age: float = SNAPSHOT_CACHE_SECONDS):
+    """Returns `collect` behind one lock: the workers it uses keep state between calls and
+    the server handles every request in its own thread. A failed collection is not kept."""
+    lock = threading.Lock()
+    cached = None
+    collected_at = 0.0
+
+    def snapshot() -> dict:
+        nonlocal cached, collected_at
+        with lock:
+            if cached is None or time.monotonic() - collected_at >= max_age:
+                cached = collect()
+                collected_at = time.monotonic()
+            return cached
+
+    return snapshot
+
+
+def startup_warnings(host: str, token: str | None) -> list[str]:
+    warnings = []
+    try:
+        loopback = ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        loopback = host == "localhost"
+    if not loopback:
+        warnings.append(tr("WARNING: The connection is not encrypted. Anyone on the network path "
+                           "can read the data and the access token. On untrusted networks start "
+                           "with --host 127.0.0.1 and connect through an SSH tunnel."))
+    if token and len(token) < MIN_TOKEN_LENGTH:
+        warnings.append(tr("WARNING: The access token is shorter than {length} characters and "
+                           "easy to guess.", length=MIN_TOKEN_LENGTH))
+    return warnings
+
+
 class MonitoringHandler(BaseHTTPRequestHandler):
     monitor: object
     snapshot: object
     token: str | None
     benchmark: object
+    history: object = None
     # Slow or idle clients can't hold a server thread forever.
     timeout = 30
 
@@ -88,14 +132,43 @@ class MonitoringHandler(BaseHTTPRequestHandler):
         return secrets.compare_digest(supplied.encode("utf-8", "replace"),
                                       f"Bearer {token}".encode("utf-8"))
 
+    def _send_history(self, query: str) -> None:
+        if not self._authorized():
+            self._send_json({"error": "unauthorized"}, 401)
+            return
+        store = type(self).history
+        if store is None:
+            self._send_json({"error": N_("This server does not record a history")}, 503)
+            return
+        try:
+            seconds = parse_range_query(query)
+        except ValueError:
+            self._send_json({"error": N_("Invalid history range")}, 400)
+            return
+        try:
+            self._send_json(store.query(seconds))
+        except sqlite3.Error:
+            traceback.print_exc()
+            self._send_json({"error": N_("Could not read the history")}, 500)
+
     def do_GET(self) -> None:  # noqa: N802 (HTTP handler override)
+        path, _, query = self.path.partition("?")
+        if path == "/api/v1/history":
+            self._send_history(query)
+            return
         if self.path != "/api/v1/snapshot":
             self._send_json({"error": "not found"}, 404)
             return
         if not self._authorized():
             self._send_json({"error": "unauthorized"}, 401)
             return
-        snapshot = type(self).snapshot()
+        try:
+            snapshot = type(self).snapshot()
+        except Exception:
+            # The cause goes to the server's log, not to the client.
+            traceback.print_exc()
+            self._send_json({"error": N_("Could not read the system data")}, 500)
+            return
         payload = {
             "version": 1,
             "timestamp": time.time(),
@@ -144,7 +217,8 @@ class MonitoringHandler(BaseHTTPRequestHandler):
 
 
 def run_server(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT,
-               token: str | None = None) -> None:
+               token: str | None = None, show_token: bool = True,
+               record_history: bool = True) -> None:
     from app.system_info import (
         AutostartEntry,
         CpuPowerMonitor,
@@ -168,17 +242,14 @@ def run_server(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT,
     docker_worker = DockerWorker()
     service_worker = ServiceListWorker()
     cpu_power_monitor = CpuPowerMonitor()
-    # Power is the energy delta between two polls; parallel requests must not interleave.
-    power_lock = threading.Lock()
 
     def full_snapshot() -> dict:
         process_worker._sync_process_table()
         processes = [asdict(row) for row in process_worker._collect_rows()]
         docker_rows, docker_error = docker_worker._collect_rows()
-        with power_lock:
-            gpu = MonitoringHandler.monitor.poll()
-            cpu_power = cpu_power_monitor.poll_watts()
-            cpu_power_reason = cpu_power_monitor.unavailable_reason()
+        gpu = MonitoringHandler.monitor.poll()
+        cpu_power = cpu_power_monitor.poll_watts()
+        cpu_power_reason = cpu_power_monitor.unavailable_reason()
         return {
             "system": system_snapshot(),
             "cpu_model": get_cpu_model_name(),
@@ -196,18 +267,26 @@ def run_server(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT,
             "disks": list_physical_disks(),
         }
 
-    MonitoringHandler.snapshot = full_snapshot
+    MonitoringHandler.snapshot = shared_snapshot(full_snapshot)
     MonitoringHandler.benchmark = make_benchmark_runner(list_physical_disks, BenchmarkWorker)
     MonitoringHandler.token = token
     server = ThreadingHTTPServer((host, port), MonitoringHandler)
+    # After the port is ours: a server that can't start must not leave a recorder behind.
+    history = HistoryService() if record_history else None
+    MonitoringHandler.history = history.store if history else None
     display_host = host if host not in ("0.0.0.0", "::") else _local_ip()
     print(tr("Lintask server running on http://{host}:{port}", host=display_host, port=port), flush=True)
-    if token:
+    if token and show_token:
         print(tr("Access token: {token}", token=token), flush=True)
+    elif token:
+        # The output usually ends up in the journal, a token you chose stays out of it.
+        print(tr("Access token: your own (not shown)"), flush=True)
     else:
         print(tr("WARNING: Server is running WITHOUT an access token (--no-auth). Anyone "
                  "who can reach this port can read all data and start benchmarks."),
               flush=True)
+    for warning in startup_warnings(host, token):
+        print(warning, flush=True)
     print(tr("Press Ctrl+C to quit"), flush=True)
     try:
         server.serve_forever()
@@ -215,6 +294,9 @@ def run_server(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT,
         print(tr("\nServer is shutting down."), flush=True)
     finally:
         server.server_close()
+        if history:
+            MonitoringHandler.history = None
+            history.shutdown()
 
 
 def _local_ip() -> str:
@@ -230,14 +312,24 @@ def server_from_args(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description=tr("Lintask monitoring server"))
     parser.add_argument("--host", default=DEFAULT_HOST)
     parser.add_argument("--port", type=int, default=DEFAULT_PORT)
-    parser.add_argument("--token", help=tr("Your own bearer token (otherwise one is generated)"))
+    parser.add_argument("--token", help=tr("Your own bearer token, visible to all users in the process list; "
+                                "better set {variable} (otherwise one is generated)",
+                                variable=TOKEN_ENV))
     parser.add_argument("--generate-token", action="store_true",
                         help=tr("Generate a random access token (default)"))
     parser.add_argument("--no-auth", action="store_true",
                         help=tr("Start without an access token (only on trusted networks!)"))
+    parser.add_argument("--no-history", action="store_true",
+                        help=tr("Do not record a history of the system values"))
     args = parser.parse_args(argv)
+    # Removed in any case, so the programs the server starts don't inherit it.
+    env_token = os.environ.pop(TOKEN_ENV, "")
     if args.no_auth and args.token:
         parser.error(tr("--no-auth and --token are mutually exclusive"))
+    if args.no_auth and env_token:
+        parser.error(tr("--no-auth and {variable} are mutually exclusive", variable=TOKEN_ENV))
+    own_token = args.token or env_token
     # A token is always required unless explicitly disabled.
-    token = None if args.no_auth else (args.token or secrets.token_urlsafe(24))
-    run_server(args.host, args.port, token)
+    token = None if args.no_auth else (own_token or secrets.token_urlsafe(24))
+    run_server(args.host, args.port, token, show_token=not own_token,
+               record_history=not args.no_history)

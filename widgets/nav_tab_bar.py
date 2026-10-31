@@ -40,6 +40,13 @@ def draw_nav_icon(painter: QPainter, kind: str, rect: QRectF, color: QColor) -> 
         painter.drawRoundedRect(QRectF(p(0.04, 0.28), p(0.96, 0.66)), 1.5, 1.5)
         for fx in (0.22, 0.41, 0.6, 0.79):
             painter.drawLine(p(fx, 0.66), p(fx, 0.84))
+    elif kind == "history":  # clock with an arrow running back
+        path = QPainterPath()
+        path.arcMoveTo(QRectF(p(0.06, 0.06), p(0.94, 0.94)), 160)
+        path.arcTo(QRectF(p(0.06, 0.06), p(0.94, 0.94)), 160, -320)
+        painter.drawPath(path)
+        painter.drawPolyline([p(0.02, 0.24), p(0.08, 0.42), p(0.26, 0.36)])
+        painter.drawPolyline([p(0.5, 0.26), p(0.5, 0.52), p(0.68, 0.62)])
     elif kind == "sensors":  # thermometer
         painter.drawRoundedRect(QRectF(p(0.4, 0.04), p(0.6, 0.66)), 2, 2)
         painter.drawEllipse(QRectF(p(0.3, 0.6), p(0.7, 0.98)))

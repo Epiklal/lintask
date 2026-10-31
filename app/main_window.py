@@ -20,11 +20,13 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from app.history import HistoryService
 from app.i18n import set_language, tr
 from app.settings import Settings
 from pages.autostart_page import AutostartPage
 from pages.benchmarks_page import BenchmarksPage
 from pages.docker_page import DockerPage
+from pages.history_page import HistoryPage
 from pages.memory_page import MemoryPage
 from pages.performance_page import PerformancePage
 from pages.processes_page import ProcessesPage
@@ -480,8 +482,8 @@ def build_qss(theme: str, style: str = "win10") -> str:
 
 
 # (icon, page title) per main tab, used by the Windows 11 navigation pane.
-_NAV_ICONS = ["processes", "performance", "memory", "sensors", "services", "docker", "autostart",
-              "benchmarks", "settings"]
+_NAV_ICONS = ["processes", "performance", "memory", "history", "sensors", "services", "docker",
+              "autostart", "benchmarks", "settings"]
 
 
 class PageFrame(QWidget):
@@ -692,6 +694,8 @@ class MainWindow(QMainWindow):
         self.settings = Settings()
         self._always_on_top = False
         set_language(self.settings.language)
+        # Outside _build_ui: recording goes on while a language change rebuilds the pages.
+        self.history = HistoryService(recording=self.settings.history_enabled)
 
         self._build_ui()
 
@@ -704,6 +708,7 @@ class MainWindow(QMainWindow):
         self.processes_page = ProcessesPage(self.settings)
         self.performance_page = PerformancePage(self.settings.smart_sudo_enabled)
         self.memory_page = MemoryPage(self.settings)
+        self.history_page = HistoryPage(self.settings, self.history)
         self.sensors_page = SensorsPage()
         self.services_page = ServicesPage()
         self.docker_page = DockerPage(self.settings)
@@ -721,6 +726,7 @@ class MainWindow(QMainWindow):
              [processes_new_task, self.processes_page.header_end_task_btn]),
             (self.performance_page, tr("Performance"), [performance_new_task]),
             (self.memory_page, tr("Memory"), None),
+            (self.history_page, tr("History"), None),
             (self.sensors_page, tr("Sensors"), None),
             (self.services_page, tr("Services"), None),
             (self.docker_page, "Docker", None),
@@ -767,6 +773,9 @@ class MainWindow(QMainWindow):
         self.settings_page.remoteConnectionChanged.connect(
             self.benchmarks_page.set_remote_connection
         )
+        self.settings_page.remoteConnectionChanged.connect(
+            self.history_page.set_remote_connection
+        )
         self.performance_page.remoteSnapshotReady.connect(self._apply_remote_snapshot)
 
         self.processes_page.set_refresh_interval(self.settings.process_interval_ms / 1000)
@@ -779,6 +788,10 @@ class MainWindow(QMainWindow):
                 self.settings.remote_token,
             )
             self.benchmarks_page.set_remote_connection(
+                True, self.settings.remote_host, self.settings.remote_port,
+                self.settings.remote_token,
+            )
+            self.history_page.set_remote_connection(
                 True, self.settings.remote_host, self.settings.remote_port,
                 self.settings.remote_token,
             )
@@ -874,6 +887,7 @@ class MainWindow(QMainWindow):
             self.page_frames[0].header_layout if win11 else None)
         self.performance_page.set_theme(colors["dark"], colors["chart_bg"], colors["charts"])
         self.memory_page.set_theme(colors["dark"], colors["chart_bg"], colors["charts"])
+        self.history_page.set_theme(colors["dark"], colors["chart_bg"], colors["charts"])
         self.processes_page.set_theme(colors, win11)
 
     def _apply_custom_qss(self, qss: str) -> None:
@@ -906,12 +920,14 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event) -> None:  # noqa: N802 (Qt override)
         self._shut_down_pages()
+        self.history.shutdown()
         super().closeEvent(event)
 
     def _shut_down_pages(self) -> None:
         self.processes_page.shutdown()
         self.performance_page.shutdown()
         self.memory_page.shutdown()
+        self.history_page.shutdown()
         self.sensors_page.shutdown()
         self.services_page.shutdown()
         self.docker_page.shutdown()

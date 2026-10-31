@@ -382,6 +382,12 @@ class TestServerUnit(unittest.TestCase):
         self.assertIn("$LINTASK_SERVER_OPTS", unit)
         self.assertIn("$WINTASKMANAGER_SERVER_OPTS", unit)
 
+    def test_the_history_survives_a_restart(self):
+        # With DynamicUser, only a StateDirectory is writable and kept between runs.
+        unit = (DEBIAN / "lintask-server.service").read_text()
+        self.assertIn("\nStateDirectory=lintask\n", unit)
+        self.assertIn("\nStateDirectoryMode=0700\n", unit)
+
 
 if __name__ == "__main__":
     unittest.main()

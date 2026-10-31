@@ -124,6 +124,9 @@ def _rapl_steps(group: str) -> list[str]:
         'if [ "${#rapl[@]}" -eq 0 ]; then',
         "    " + _echo("No RAPL energy counter found: the kernel offers no power reading for this CPU."),
         f'elif sudo chgrp {shlex.quote(group)} "${{rapl[@]}}" && sudo chmod g+r "${{rapl[@]}}"; then',
+        "    " + _echo("Note: the CPU energy counters are now readable for your user group. The "
+                       "kernel restricts them because they can leak secrets through a side "
+                       "channel (PLATYPUS, CVE-2020-8694)."),
         "    if [ -e /etc/NIXOS ]; then",
         "        " + _echo("Done until the next reboot. To make it permanent, add this to "
                            "/etc/nixos/configuration.nix:"),
@@ -155,8 +158,11 @@ def setup_script(helper_source: str, username: str, group: str) -> str:
         # The distribution package already ships the helper - only the sudo rule is missing.
         helper_step = "true"
     else:
+        # NixOS has no /bin/bash, so the helper's absolute interpreter is adapted there.
+        interpreter = shlex.quote(f"1s|.*|#!{_system_binary('bash')} -p|")
         helper_step = ("sudo install -d -m 0755 /usr/local/libexec"
-                       f" && sudo install -m 0755 {shlex.quote(helper_source)} {HELPER_TARGET}")
+                       f" && sudo install -m 0755 {shlex.quote(helper_source)} {HELPER_TARGET}"
+                       f" && {{ [ -x /bin/bash ] || sudo sed -i {interpreter} {HELPER_TARGET}; }}")
     install_packages = package_install_command()
     if install_packages:
         packages_step = f"{install_packages} || " + _echo(

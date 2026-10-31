@@ -10,6 +10,7 @@ import json
 import os
 import socket
 import threading
+import time
 import unittest
 from http.server import ThreadingHTTPServer
 from unittest import mock
@@ -28,6 +29,7 @@ from app.remote_server import (
 TOKEN = "correct-token"
 BENCHMARK = "/api/v1/benchmark"
 SNAPSHOT = "/api/v1/snapshot"
+TOKEN_ENV = "LINTASK_SERVER_TOKEN"
 DISKS = [{"mountpoints": ["/", "/data"]}, {"mountpoints": []}, {"mountpoints": None}]
 
 
@@ -322,11 +324,130 @@ class TestRealWorker(unittest.TestCase):
             self.assertTrue(callable(getattr(BenchmarkWorker, f"_run_{kind}")))
 
 
+class TestSharedSnapshot(unittest.TestCase):
+    def test_parallel_requests_share_one_collection(self):
+        running = peak = calls = 0
+        guard = threading.Lock()
+
+        def collect():
+            nonlocal running, peak, calls
+            with guard:
+                running += 1
+                calls += 1
+                peak = max(peak, running)
+            time.sleep(0.05)
+            with guard:
+                running -= 1
+            return {"calls": calls}
+
+        snapshot = remote_server.shared_snapshot(collect, max_age=60)
+        barrier = threading.Barrier(8)
+        results = []
+
+        def request():
+            barrier.wait()
+            results.append(snapshot())
+
+        threads = [threading.Thread(target=request) for _ in range(8)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+        self.assertEqual(peak, 1)
+        self.assertEqual(calls, 1)
+        self.assertEqual(results, [{"calls": 1}] * 8)
+
+    def test_old_data_is_collected_again(self):
+        collect = mock.Mock(side_effect=[{"n": 1}, {"n": 2}])
+        snapshot = remote_server.shared_snapshot(collect, max_age=0)
+        self.assertEqual(snapshot(), {"n": 1})
+        self.assertEqual(snapshot(), {"n": 2})
+
+    def test_failed_collection_is_tried_again(self):
+        collect = mock.Mock(side_effect=[RuntimeError("gone"), {"n": 1}])
+        snapshot = remote_server.shared_snapshot(collect, max_age=60)
+        with self.assertRaises(RuntimeError):
+            snapshot()
+        self.assertEqual(snapshot(), {"n": 1})
+
+
+class TestSnapshotFailure(ServerTestCase):
+    def test_cause_goes_to_the_log_and_not_to_the_client(self):
+        def broken():
+            raise RuntimeError("secret /home/alice/path")
+
+        self.server.RequestHandlerClass.snapshot = staticmethod(broken)
+        log = io.StringIO()
+        with contextlib.redirect_stderr(log):
+            status, payload = self.call("GET", SNAPSHOT)
+        self.assertEqual(status, 500)
+        self.assertEqual(payload, {"error": "Could not read the system data"})
+        self.assertIn("secret /home/alice/path", log.getvalue())
+
+
+class TestStartupWarnings(unittest.TestCase):
+    LONG_TOKEN = "x" * 16
+
+    def test_reachable_from_the_network_warns(self):
+        for host in ("0.0.0.0", "::", "192.168.1.5", "server.example"):
+            with self.subTest(host=host):
+                self.assertEqual(len(remote_server.startup_warnings(host, self.LONG_TOKEN)), 1)
+
+    def test_loopback_does_not_warn(self):
+        for host in ("127.0.0.1", "127.0.0.2", "::1", "localhost"):
+            with self.subTest(host=host):
+                self.assertEqual(remote_server.startup_warnings(host, self.LONG_TOKEN), [])
+
+    def test_short_token_warns(self):
+        self.assertEqual(len(remote_server.startup_warnings("127.0.0.1", "x" * 15)), 1)
+
+    def test_no_token_is_warned_about_elsewhere(self):
+        self.assertEqual(remote_server.startup_warnings("127.0.0.1", None), [])
+
+
 class TestArguments(unittest.TestCase):
+    def setUp(self):
+        environment = mock.patch.dict(os.environ)
+        environment.start()
+        self.addCleanup(environment.stop)
+        os.environ.pop(TOKEN_ENV, None)
+
     def started_with(self, *argv):
         with mock.patch.object(remote_server, "run_server") as run_server:
             remote_server.server_from_args(list(argv))
         return run_server.call_args.args
+
+    def test_token_from_the_environment(self):
+        os.environ[TOKEN_ENV] = "from-environment"
+        self.assertEqual(self.started_with()[2], "from-environment")
+
+    def test_programs_the_server_starts_do_not_inherit_the_token(self):
+        os.environ[TOKEN_ENV] = "from-environment"
+        self.started_with()
+        self.assertNotIn(TOKEN_ENV, os.environ)
+
+    def test_command_line_wins_over_the_environment(self):
+        os.environ[TOKEN_ENV] = "from-environment"
+        self.assertEqual(self.started_with("--token", "abc")[2], "abc")
+
+    def test_no_auth_with_environment_token_is_an_error(self):
+        os.environ[TOKEN_ENV] = "from-environment"
+        with mock.patch.object(remote_server, "run_server") as run_server, \
+                contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as caught:
+            remote_server.server_from_args(["--no-auth"])
+        self.assertEqual(caught.exception.code, 2)
+        run_server.assert_not_called()
+
+    def test_only_a_generated_token_is_printed(self):
+        def shows_token(*argv):
+            with mock.patch.object(remote_server, "run_server") as run_server:
+                remote_server.server_from_args(list(argv))
+            return run_server.call_args.kwargs["show_token"]
+
+        self.assertTrue(shows_token())
+        self.assertFalse(shows_token("--token", "abc"))
+        os.environ[TOKEN_ENV] = "from-environment"
+        self.assertFalse(shows_token())
 
     def test_token_is_generated_by_default(self):
         _, _, first = self.started_with()
