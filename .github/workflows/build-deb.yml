@@ -62,7 +62,11 @@ jobs:
       - name: Run unit tests
         env:
           QT_QPA_PLATFORM: offscreen
-        run: /opt/lintask/venv/bin/python -m unittest discover -s tests -t .
+        run: |
+          # The package only creates the venv where the system has no PySide6
+          py=/opt/lintask/venv/bin/python
+          [ -x "$py" ] || py=/usr/bin/python3
+          "$py" -m unittest discover -s tests -t .
 
       - name: Remove package again
         run: |
