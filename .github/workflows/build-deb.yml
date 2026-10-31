@@ -55,8 +55,9 @@ jobs:
           timeout -s KILL 20 lintask
           rc=$?
           set -e
-          # 137 = still running after 20 s (ended by timeout), anything else = crash
-          test "$rc" -eq 137 || { echo "lintask exited with code $rc"; exit 1; }
+          # 124 or 137 = still running after 20 s (ended by timeout; which one
+          # depends on the timeout implementation), anything else = crash
+          test "$rc" -eq 124 || test "$rc" -eq 137 || { echo "lintask exited with code $rc"; exit 1; }
 
       - name: Run unit tests
         env:
