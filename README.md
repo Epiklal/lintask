@@ -1032,8 +1032,8 @@ Push a tag that starts with `v`. GitHub Actions then builds the package with
 publishes a GitHub Release with the `.deb` attached:
 
 ```bash
-git tag v1.1.0
-git push origin v1.1.0
+git tag v1.1.1
+git push origin v1.1.1
 ```
 
 Every push to `main` and every manual run (**Actions** tab → *Build .deb* → *Run
