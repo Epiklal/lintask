@@ -36,10 +36,6 @@ def draw_nav_icon(painter: QPainter, kind: str, rect: QRectF, color: QColor) -> 
     elif kind == "performance":  # pulse line
         painter.drawPolyline([p(0.02, 0.55), p(0.28, 0.55), p(0.4, 0.2), p(0.58, 0.85),
                               p(0.7, 0.45), p(0.98, 0.45)])
-    elif kind == "memory":  # RAM module with contacts
-        painter.drawRoundedRect(QRectF(p(0.04, 0.28), p(0.96, 0.66)), 1.5, 1.5)
-        for fx in (0.22, 0.41, 0.6, 0.79):
-            painter.drawLine(p(fx, 0.66), p(fx, 0.84))
     elif kind == "history":  # clock with an arrow running back
         path = QPainterPath()
         path.arcMoveTo(QRectF(p(0.06, 0.06), p(0.94, 0.94)), 160)

@@ -3,6 +3,8 @@ so the process list never stalls the UI thread, no matter how many processes exi
 """
 from __future__ import annotations
 
+import ctypes
+import fcntl
 import glob
 import json
 import os
@@ -11,6 +13,7 @@ import re
 import shlex
 import shutil
 import socket
+import struct
 import subprocess
 import threading
 import time
@@ -19,7 +22,7 @@ from dataclasses import dataclass
 import psutil
 from PySide6.QtCore import QThread, Signal
 
-from app.hardware_setup import helper_path
+from app.hardware_setup import smart_helper, sudo_helper
 from app.i18n import N_
 
 # A leftover nvidia-smi is useless while nouveau drives the card (no NVIDIA module).
@@ -27,15 +30,62 @@ _NVIDIA_SMI = (shutil.which("nvidia-smi")
                if os.path.isdir("/proc/driver/nvidia") or not os.path.isdir("/sys/module/nouveau")
                else None)
 
-_DRM_CLIENT_ID_RE = re.compile(r"^drm-client-id:\s+(\d+)")
+_DRM_DRIVER_RE = re.compile(r"^drm-driver:\s+(\S+)", re.MULTILINE)
+_DRM_PDEV_RE = re.compile(r"^drm-pdev:\s+(\S+)", re.MULTILINE)
+_DRM_CLIENT_ID_RE = re.compile(r"^drm-client-id:\s+(\d+)", re.MULTILINE)
 _DRM_VRAM_RE = re.compile(r"^drm-memory-vram:\s+(\d+)\s+KiB")
 _DRM_ENGINE_RE = re.compile(r"^drm-engine-([\w-]+):\s+(\d+)\s+ns")
-# amdgpu: gfx/compute/sdma/enc/dec/jpeg; i915 (Intel): render/copy/video/video-enhance.
+# xe (Intel Arc / Lunar Lake and newer) counts GPU cycles instead of nanoseconds.
+_DRM_CYCLES_RE = re.compile(r"^drm-cycles-([\w-]+):\s+(\d+)")
+_DRM_TOTAL_CYCLES_RE = re.compile(r"^drm-total-cycles-([\w-]+):\s+(\d+)")
+_DRM_CAPACITY_RE = re.compile(r"^drm-engine-capacity-([\w-]+):\s+(\d+)")
+# Generic memory keys: vram0 (xe), local0 (i915 Arc), vram (amdgpu). No unit means bytes.
+_DRM_RESIDENT_RE = re.compile(r"^drm-resident-((?:vram|local)\d*):\s+(\d+)(?:\s+([KMG]iB))?")
+_DRM_UNITS = {None: 1 / 1024, "KiB": 1, "MiB": 1024, "GiB": 1024 * 1024}
+# amdgpu: gfx/compute/sdma/enc/dec/jpeg; i915 (Intel): render/copy/video/video-enhance;
+# xe (Intel): rcs/ccs/bcs/vcs/vecs.
 _GPU_ENGINE_LABELS = {
     "gfx": "3D", "render": "3D", "compute": "Compute", "sdma": N_("Copy"), "dma": N_("Copy"),
     "copy": N_("Copy"), "enc": N_("Video Encode"), "dec": N_("Video Decode"),
     "video": N_("Video Decode"), "video-enhance": N_("Video Processing"), "jpeg": "JPEG",
+    "rcs": "3D", "ccs": "Compute", "bcs": N_("Copy"), "vcs": N_("Video Decode"),
+    "vecs": N_("Video Processing"),
 }
+# Engines whose load counts as a process's "GPU %" (3D and compute).
+_DRM_MAIN_ENGINES = ("gfx", "render", "compute", "rcs", "ccs")
+
+
+def _parse_drm_fdinfo(content: str) -> dict:
+    """Engine counters and VRAM of one DRM client (one fdinfo file).
+
+    "ns" holds busy nanoseconds (amdgpu/i915), "cycles"/"total_cycles" the xe
+    cycle counters and "capacity" the engine count of a class (i915/xe). vram_kib
+    is None when the client reports no device-local memory (e.g. an iGPU)."""
+    usage = {"ns": {}, "cycles": {}, "total_cycles": {}, "capacity": {}, "vram_kib": None}
+    legacy_vram = resident_vram = None
+    for line in content.splitlines():
+        match = _DRM_ENGINE_RE.match(line)
+        if match:
+            usage["ns"][match.group(1)] = int(match.group(2))
+            continue
+        for regex, key in ((_DRM_CYCLES_RE, "cycles"), (_DRM_TOTAL_CYCLES_RE, "total_cycles"),
+                           (_DRM_CAPACITY_RE, "capacity")):
+            match = regex.match(line)
+            if match:
+                usage[key][match.group(1)] = int(match.group(2))
+                break
+        else:
+            match = _DRM_VRAM_RE.match(line)
+            if match:
+                legacy_vram = int(match.group(1))
+                continue
+            match = _DRM_RESIDENT_RE.match(line)
+            if match:
+                kib = int(match.group(2)) * _DRM_UNITS[match.group(3)]
+                resident_vram = (resident_vram or 0) + kib
+    # amdgpu reports both forms for the same memory: count it once.
+    usage["vram_kib"] = legacy_vram if legacy_vram is not None else resident_vram
+    return usage
 
 
 def _pcie_link_info(current_speed: str, current_width: str,
@@ -102,7 +152,8 @@ class GpuMonitor:
 
     def __init__(self):
         self._nvidia = _NVIDIA_SMI
-        self._prev_busy: dict[int, tuple[float, int]] = {}
+        # pid -> (time, busy ns, xe cycles, xe total cycles)
+        self._prev_busy: dict[int, tuple[float, int, int, int]] = {}
         self._backend_available = bool(self._nvidia) or self._probe_drm_fdinfo()
 
     def available(self) -> bool:
@@ -131,9 +182,15 @@ class GpuMonitor:
         return False
 
     def poll(self) -> dict[int, dict]:
+        # Mixed systems (e.g. NVIDIA + AMD) need both sources: nvidia-smi only sees NVIDIA cards.
+        usage = self._poll_drm_fdinfo()
         if self._nvidia:
-            return self._poll_nvidia()
-        return self._poll_drm_fdinfo()
+            for pid, stats in self._poll_nvidia().items():
+                entry = usage.setdefault(pid, {"vram_mb": 0.0, "gpu_percent": 0.0})
+                entry["vram_mb"] = entry.get("vram_mb", 0.0) + stats.get("vram_mb", 0.0)
+                entry["gpu_percent"] = max(entry.get("gpu_percent", 0.0),
+                                           stats.get("gpu_percent", 0.0))
+        return usage
 
     def _poll_nvidia(self) -> dict[int, dict]:
         usage: dict[int, dict] = {}
@@ -193,8 +250,8 @@ class GpuMonitor:
             except OSError:
                 continue
 
-            vram_kib = 0
-            busy_ns = 0
+            vram_kib = 0.0
+            busy_ns = cycles = total_cycles = 0
             found_drm = False
             seen_clients: set[str] = set()  # dedupe fds pointing at the same DRM client
             for fd in fd_names:
@@ -203,7 +260,11 @@ class GpuMonitor:
                         content = f.read()
                 except OSError:
                     continue
-                if "drm-driver:" not in content:
+                driver_match = _DRM_DRIVER_RE.search(content)
+                if not driver_match:
+                    continue
+                # nvidia-smi already reports NVIDIA clients; counting them here too would double them.
+                if self._nvidia and driver_match.group(1).startswith("nvidia"):
                     continue
 
                 client_match = _DRM_CLIENT_ID_RE.search(content)
@@ -213,14 +274,13 @@ class GpuMonitor:
                 seen_clients.add(client_id)
                 found_drm = True
 
-                for line in content.splitlines():
-                    vram_match = _DRM_VRAM_RE.match(line)
-                    if vram_match:
-                        vram_kib += int(vram_match.group(1))
-                        continue
-                    engine_match = _DRM_ENGINE_RE.match(line)
-                    if engine_match and engine_match.group(1) in ("gfx", "render", "compute"):
-                        busy_ns += int(engine_match.group(2))
+                usage = _parse_drm_fdinfo(content)
+                vram_kib += usage["vram_kib"] or 0
+                for engine in _DRM_MAIN_ENGINES:
+                    busy_ns += usage["ns"].get(engine, 0)
+                    cycles += usage["cycles"].get(engine, 0)
+                # The cycle total is the GPU clock, the same for every engine and client.
+                total_cycles = max(total_cycles, *usage["total_cycles"].values(), 0)
 
             if not found_drm:
                 continue
@@ -228,11 +288,15 @@ class GpuMonitor:
             gpu_percent = 0.0
             prev = self._prev_busy.get(pid)
             if prev is not None:
-                prev_time, prev_busy = prev
+                prev_time, prev_busy, prev_cycles, prev_total = prev
                 dt = now - prev_time
                 if dt > 0:
-                    gpu_percent = max(0.0, min(100.0, (busy_ns - prev_busy) / (dt * 1e9) * 100))
-            self._prev_busy[pid] = (now, busy_ns)
+                    gpu_percent = (busy_ns - prev_busy) / (dt * 1e9) * 100
+                if total_cycles > prev_total:
+                    gpu_percent = max(gpu_percent,
+                                      (cycles - prev_cycles) / (total_cycles - prev_total) * 100)
+                gpu_percent = max(0.0, min(100.0, gpu_percent))
+            self._prev_busy[pid] = (now, busy_ns, cycles, total_cycles)
             result[pid] = {"vram_mb": vram_kib / 1024, "gpu_percent": gpu_percent}
 
         # Forget exited processes, or the dict keeps every PID that ever used the GPU.
@@ -272,18 +336,77 @@ def _lspci_gpu_name(slot: str) -> str | None:
     vendor = next((short for key, short in _GPU_VENDORS.items() if key in vendor_text), "")
     bracket = re.search(r"\[([^\]]+)\]\s*$", device_text)
     family = bracket.group(1) if bracket else device_text
-    variants = family.split("/")
+    variants = [v.strip() for v in family.split("/")]
     model = variants[0]
     if len(variants) > 1:
         # 'Radeon RX 7900 XT' + '7900 XTX' -> prefix 'Radeon RX', candidates per variant.
         tokens = variants[0].split()
-        alt_len = len(variants[1].split())
-        prefix = " ".join(tokens[:-alt_len]) if len(tokens) > alt_len else ""
-        suffixes = [" ".join(tokens[-alt_len:]), *variants[1:]]
+        first_number = next((i for i, t in enumerate(tokens) if any(c.isdigit() for c in t)), 0)
+        prefix = " ".join(tokens[:first_number])
+        suffixes = [" ".join(tokens[first_number:]), *variants[1:]]
         matching = [v for v in suffixes if re.search(rf"\b{re.escape(v)}\b", subsystem)]
         if matching:
             model = f"{prefix} {max(matching, key=len)}".strip()
     return f"{vendor} {model}".strip()
+
+
+# The system's list comes first, but old distributions ship one that lacks recent cards.
+_AMDGPU_IDS_FILES = (
+    "/usr/share/libdrm/amdgpu.ids",
+    "/opt/amdgpu/share/libdrm/amdgpu.ids",
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "amdgpu.ids"),
+)
+
+
+def _sysfs_hex(path: str) -> int | None:
+    try:
+        return int(_read_sysfs_str(path) or "", 16)
+    except ValueError:
+        return None
+
+
+def _lookup_amdgpu_id(path: str, device: int, revision: int, subsystem: tuple) -> str | None:
+    """Product name from a libdrm amdgpu.ids file, None if it does not list this card."""
+    name = None
+    try:
+        with open(path, encoding="utf-8") as f:
+            for line in f:
+                fields = [part.strip() for part in line.split(",", 2)]
+                if line.startswith("#") or len(fields) != 3:
+                    continue
+                try:
+                    ids = (int(fields[0], 16), int(fields[1], 16))
+                except ValueError:
+                    continue
+                if line[0].isspace():  # board-specific override of the entry above
+                    if name and ids == subsystem:
+                        return fields[2]
+                elif name:
+                    return name
+                elif ids == (device, revision):
+                    name = fields[2]
+    except (OSError, UnicodeDecodeError):
+        return None
+    return name
+
+
+def _amdgpu_product_name(card_path: str) -> str | None:
+    """Exact AMD model. One device ID can cover several cards (0x7590 is the RX 9050, RX 9060
+    and RX 9060 XT), so only the ID together with the revision identifies the model.
+    """
+    if _sysfs_hex(f"{card_path}/vendor") != 0x1002:
+        return None
+    device = _sysfs_hex(f"{card_path}/device")
+    revision = _sysfs_hex(f"{card_path}/revision")
+    if device is None or revision is None:
+        return None
+    subsystem = (_sysfs_hex(f"{card_path}/subsystem_vendor"),
+                 _sysfs_hex(f"{card_path}/subsystem_device"))
+    for path in _AMDGPU_IDS_FILES:
+        name = _lookup_amdgpu_id(path, device, revision, subsystem)
+        if name:
+            return name
+    return None
 
 
 RAPL_PERMISSION_HINT = N_("No read permission (Settings → Set up hardware data)")
@@ -359,20 +482,199 @@ def _nvidia_float(value: str) -> float | None:
         return None
 
 
-class GpuSystemMonitor:
-    """Best-effort overall (not per-process) GPU stats: utilization/VRAM/temp/power.
+# Drivers that only keep the boot framebuffer alive: no GPU of their own.
+_FRAMEBUFFER_DRIVERS = {"simple-framebuffer", "simpledrm", "efifb", "vesafb", "ofdrm"}
 
-    Uses `nvidia-smi` if present, else the AMD/Intel/nouveau sysfs interface under
-    /sys/class/drm/cardN/device (gpu_busy_percent, mem_info_vram_*, hwmon
-    temp/power). Cheap enough (plain file reads) to poll from the UI thread.
+
+def _normalize_pci_slot(bus_id: str) -> str:
+    """nvidia-smi prints "00000000:01:00.0", sysfs "0000:01:00.0"."""
+    return bus_id.strip()[-12:].lower()
+
+
+def _nvidia_gpu_slots() -> list[tuple[int, str]]:
+    """(nvidia-smi index, PCI slot) for every GPU the NVIDIA driver drives."""
+    if not _NVIDIA_SMI:
+        return []
+    try:
+        out = subprocess.check_output(
+            [_NVIDIA_SMI, "--query-gpu=index,pci.bus_id", "--format=csv,noheader"],
+            text=True, timeout=2, stderr=subprocess.DEVNULL,
+        )
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError):
+        return []
+    gpus = []
+    for line in out.splitlines():
+        parts = [part.strip() for part in line.split(",")]
+        if len(parts) == 2 and parts[0].isdigit():
+            gpus.append((int(parts[0]), _normalize_pci_slot(parts[1])))
+    return gpus
+
+
+def list_gpus(drm_base: str = "/sys/class/drm") -> list[dict]:
+    """Every GPU in the system, e.g. an NVIDIA and an AMD card side by side.
+
+    NVIDIA cards with the proprietary driver are read through nvidia-smi, all others
+    (amdgpu, i915, xe, nouveau, ...) through sysfs. The first entry is the GPU that
+    used to be the only one shown: a dedicated card before the integrated one."""
+    nvidia = _nvidia_gpu_slots()
+    nvidia_by_slot = {slot: index for index, slot in nvidia}
+    cards = []
+    try:
+        names = sorted(os.listdir(drm_base), key=lambda name: (len(name), name))
+    except OSError:
+        names = []
+    for name in names:
+        if not re.match(r"^card\d+$", name):
+            continue
+        device = f"{drm_base}/{name}/device"
+        try:
+            with open(f"{device}/uevent") as f:
+                uevent = f.read()
+        except OSError:
+            continue
+        driver_match = re.search(r"DRIVER=(\S+)", uevent)
+        driver = driver_match.group(1) if driver_match else ""
+        if driver in _FRAMEBUFFER_DRIVERS:
+            continue
+        slot_match = re.search(r"PCI_SLOT_NAME=(\S+)", uevent)
+        slot = slot_match.group(1).lower() if slot_match else None
+        if slot is not None and slot in nvidia_by_slot:
+            continue  # nvidia-smi reports this one
+        if any(card["pci_slot"] == slot for card in cards if slot is not None):
+            continue
+        boot_vga = _read_sysfs_str(f"{device}/boot_vga") == "1"
+        has_vram = os.path.exists(f"{device}/mem_info_vram_total")
+        has_busy = os.path.exists(f"{device}/gpu_busy_percent")
+        vendor = _read_sysfs_str(f"{device}/vendor") or ""
+        score = (not boot_vga, has_vram, has_busy, vendor == "0x10de")
+        cards.append({"backend": "sysfs", "index": None, "card_path": device,
+                      "pci_slot": slot, "score": score})
+    # Stable sort: equal cards keep the card0, card1, ... order.
+    cards.sort(key=lambda card: card.pop("score"), reverse=True)
+    for card in cards:
+        # fdinfo of old kernels names no device: only usable when there is one card.
+        card["only_drm_card"] = len(cards) == 1
+    nvidia_gpus = [{"backend": "nvidia", "index": index, "card_path": None, "pci_slot": slot}
+                   for index, slot in sorted(nvidia)]
+    return nvidia_gpus + cards
+
+
+# Memory-region queries of i915 and xe (include/uapi/drm/i915_drm.h, xe_drm.h). The
+# render node allows them without root, unlike xe's tile*/physical_vram_size_bytes.
+_DRM_IOCTL_I915_QUERY = 0xC0106479       # DRM_IOWR(0x40 + 0x39, struct drm_i915_query)
+_DRM_IOCTL_XE_DEVICE_QUERY = 0xC0286440  # DRM_IOWR(0x40 + 0x00, struct drm_xe_device_query)
+_I915_QUERY_MEMORY_REGIONS = 4
+_XE_QUERY_MEM_REGIONS = 1
+_I915_QUERY_ITEM = "=QiIQ"   # query_id, length, flags, data_ptr
+_XE_DEVICE_QUERY = "=QIIQ2Q"  # extensions, query, size, data, reserved[2]
+_DRM_MEM_REGION_SIZE = 88  # drm_i915_memory_region_info and drm_xe_mem_region
+_DRM_MEMORY_CLASS_DEVICE = 1  # I915_MEMORY_CLASS_DEVICE / DRM_XE_MEM_REGION_CLASS_VRAM
+
+
+def _sum_device_memory_regions(data: bytes, header_size: int) -> int | None:
+    """Bytes of device memory (VRAM) in a memory-region query answer, None without any.
+
+    Both drivers start the answer with a u32 region count; each 88-byte region starts
+    with its u16 memory class and has its size as u64 at offset 8 (i915 probed_size,
+    xe total_size)."""
+    if len(data) < header_size:
+        return None
+    (count,) = struct.unpack_from("=I", data)
+    total = None
+    for index in range(count):
+        offset = header_size + index * _DRM_MEM_REGION_SIZE
+        if offset + _DRM_MEM_REGION_SIZE > len(data):
+            break
+        (mem_class,) = struct.unpack_from("=H", data, offset)
+        (size,) = struct.unpack_from("=Q", data, offset + 8)
+        if mem_class == _DRM_MEMORY_CLASS_DEVICE:
+            total = (total or 0) + size
+    return total
+
+
+def _i915_query(fd: int, query_id: int) -> bytes | None:
+    """One DRM_IOCTL_I915_QUERY item: asked once for its length, then for the data."""
+    item = ctypes.create_string_buffer(struct.calcsize(_I915_QUERY_ITEM))
+    struct.pack_into(_I915_QUERY_ITEM, item, 0, query_id, 0, 0, 0)
+    request = bytearray(struct.pack("=IIQ", 1, 0, ctypes.addressof(item)))
+    fcntl.ioctl(fd, _DRM_IOCTL_I915_QUERY, request)
+    (length,) = struct.unpack_from("=i", item, 8)
+    if length <= 0:  # negative: the error code of this item
+        return None
+    data = ctypes.create_string_buffer(length)
+    struct.pack_into(_I915_QUERY_ITEM, item, 0, query_id, length, 0, ctypes.addressof(data))
+    fcntl.ioctl(fd, _DRM_IOCTL_I915_QUERY, request)
+    if struct.unpack_from("=i", item, 8)[0] <= 0:
+        return None
+    return data.raw
+
+
+def _xe_device_query(fd: int, query: int) -> bytes | None:
+    """One DRM_IOCTL_XE_DEVICE_QUERY: asked once for its size, then for the data."""
+    request = bytearray(struct.pack(_XE_DEVICE_QUERY, 0, query, 0, 0, 0, 0))
+    fcntl.ioctl(fd, _DRM_IOCTL_XE_DEVICE_QUERY, request)
+    (size,) = struct.unpack_from("=I", request, 12)
+    if size == 0:
+        return None
+    data = ctypes.create_string_buffer(size)
+    struct.pack_into(_XE_DEVICE_QUERY, request, 0, 0, query, size, ctypes.addressof(data), 0, 0)
+    fcntl.ioctl(fd, _DRM_IOCTL_XE_DEVICE_QUERY, request)
+    return data.raw
+
+
+def _drm_vram_total(card_path: str, driver: str) -> int | None:
+    """VRAM size in bytes that i915 or xe report for this card, None for other drivers,
+    integrated graphics or a render node the user may not open."""
+    if driver not in ("i915", "xe"):
+        return None
+    nodes = sorted(glob.glob(f"{card_path}/drm/renderD*"))
+    if not nodes:
+        return None
+    try:
+        fd = os.open(f"/dev/dri/{os.path.basename(nodes[0])}", os.O_RDWR | os.O_CLOEXEC)
+    except OSError:
+        return None
+    try:
+        if driver == "xe":
+            data = _xe_device_query(fd, _XE_QUERY_MEM_REGIONS)
+            return _sum_device_memory_regions(data, 8) if data else None
+        data = _i915_query(fd, _I915_QUERY_MEMORY_REGIONS)
+        return _sum_device_memory_regions(data, 16) if data else None
+    except OSError:
+        return None
+    finally:
+        os.close(fd)
+
+
+def _numbered_sensors(hwmon_dir: str, kind: str) -> list[str]:
+    """hwmon `<kind>N_input` files ordered by N (temp2 before temp10)."""
+    paths = glob.glob(f"{hwmon_dir}/{kind}[0-9]*_input")
+    return sorted(paths, key=lambda path: int(re.search(r"(\d+)_input$", path).group(1)))
+
+
+class GpuSystemMonitor:
+    """Best-effort overall (not per-process) GPU stats for one GPU: utilization/VRAM/temp/power.
+
+    Uses `nvidia-smi` for NVIDIA cards with the proprietary driver, else the
+    AMD/Intel/nouveau sysfs interface under /sys/class/drm/cardN/device
+    (gpu_busy_percent, mem_info_vram_*, hwmon temp/power). Without `gpu` (an entry
+    of list_gpus()) it watches the first GPU.
     """
 
-    def __init__(self):
-        self._nvidia = _NVIDIA_SMI
-        self._card_path = None if self._nvidia else self._find_card()
+    def __init__(self, gpu: dict | None = None):
+        if gpu is None:
+            gpus = list_gpus()
+            gpu = gpus[0] if gpus else {}
+        self._nvidia = _NVIDIA_SMI if gpu.get("backend") == "nvidia" else None
+        self._nvidia_index = gpu.get("index")
+        self._card_path = gpu.get("card_path") if gpu.get("backend") == "sysfs" else None
+        self._pci_slot = gpu.get("pci_slot")
+        self._only_drm_card = gpu.get("only_drm_card", True)
         self._power_counter = self._find_power_counter() if self._card_path else None
-        self._prev_engine_busy: dict[str, int] = {}
+        self._prev_engine_usage: dict | None = None
         self._prev_engine_time: float | None = None
+        self._queried_vram_total: int | None = None
+        self._vram_total_queried = False
         # Name / driver / PCI location never change, so they are read only once.
         self._static_info = (self._nvidia_static_info() if self._nvidia
                              else self._sysfs_static_info() if self._card_path else {})
@@ -380,32 +682,18 @@ class GpuSystemMonitor:
     def available(self) -> bool:
         return bool(self._nvidia or self._card_path)
 
-    @staticmethod
-    def _find_card() -> str | None:
-        base = "/sys/class/drm"
-        candidates = []
-        try:
-            for name in sorted(os.listdir(base)):
-                if not re.match(r"^card\d+$", name):
-                    continue
-                device = f"{base}/{name}/device"
-                if not os.path.exists(f"{device}/uevent"):
-                    continue
-                boot_vga = _read_sysfs_str(f"{device}/boot_vga") == "1"
-                has_vram = os.path.exists(f"{device}/mem_info_vram_total")
-                has_busy = os.path.exists(f"{device}/gpu_busy_percent")
-                vendor = _read_sysfs_str(f"{device}/vendor") or ""
-                score = (not boot_vga, has_vram, has_busy, vendor == "0x10de")
-                candidates.append((score, device))
-        except OSError:
-            pass
-        return max(candidates, default=((False, False, False, False), None))[1]
+    def _nvidia_command(self, *args: str) -> list[str]:
+        """nvidia-smi call limited to this GPU (without -i it reports all of them)."""
+        selector = ["-i", str(self._nvidia_index)] if self._nvidia_index is not None else []
+        return [self._nvidia, *args, *selector]
 
     def _find_power_counter(self) -> _EnergyCounter | None:
         """Energy counter for GPUs without a power sensor: Intel Arc (i915/xe hwmon
-        energy1_input) or Intel integrated graphics (RAPL uncore zone)."""
-        for energy_path in sorted(glob.glob(f"{self._card_path}/hwmon/hwmon*/energy1_input")):
-            return _EnergyCounter(energy_path)
+        energy1_input; xe may only have energy2_input, the package) or Intel
+        integrated graphics (RAPL uncore zone)."""
+        for hwmon_dir in sorted(glob.glob(f"{self._card_path}/hwmon/hwmon*")):
+            for energy_path in _numbered_sensors(hwmon_dir, "energy"):
+                return _EnergyCounter(energy_path)
         is_intel_igpu = (_read_sysfs_str(f"{self._card_path}/vendor") == "0x8086"
                          and os.path.basename(os.path.realpath(self._card_path)) == "0000:00:02.0")
         uncore = _rapl_counters("uncore") if is_intel_igpu else []
@@ -417,7 +705,11 @@ class GpuSystemMonitor:
         elif self._card_path:
             result = self._poll_sysfs()
             if result is not None:
-                result["engines"] = self._poll_sysfs_engines()
+                usage = self._collect_drm_usage(self._pci_slot, self._only_drm_card)
+                result["engines"] = self._poll_sysfs_engines(usage)
+                if result["vram_used_mb"] is None and usage["vram_kib"] is not None:
+                    # Intel Arc has no mem_info_vram_used: add up what its clients hold.
+                    result["vram_used_mb"] = usage["vram_kib"] / 1024
                 if result["percent"] is None:
                     # i915/xe/nouveau have no gpu_busy_percent: use the busiest engine.
                     result["percent"] = min(100.0, max(result["engines"].values(), default=0.0))
@@ -428,8 +720,8 @@ class GpuSystemMonitor:
     def _nvidia_static_info(self) -> dict:
         try:
             out = subprocess.check_output(
-                [self._nvidia, "--query-gpu=driver_version,pci.bus_id",
-                 "--format=csv,noheader"],
+                self._nvidia_command("--query-gpu=driver_version,pci.bus_id",
+                                     "--format=csv,noheader"),
                 text=True, timeout=2, stderr=subprocess.DEVNULL,
             )
             version, bus_id = (part.strip() for part in out.splitlines()[0].split(","))
@@ -454,20 +746,20 @@ class GpuSystemMonitor:
         info["driver_version"] = version or f"Kernel {platform.release()}"
         if slot:
             info["pci_location"] = _pci_location_text(slot.group(1))
-            name = _lspci_gpu_name(slot.group(1))
-            if name:
-                info["name"] = name
+        name = _amdgpu_product_name(self._card_path) or (slot and _lspci_gpu_name(slot.group(1)))
+        if name:
+            info["name"] = name
         return info
 
     def _poll_nvidia(self) -> dict | None:
         try:
             out = subprocess.check_output(
-                [self._nvidia,
-                 "--query-gpu=name,utilization.gpu,memory.used,memory.total,"
-                 "temperature.gpu,power.draw,pcie.link.gen.current,"
-                 "pcie.link.width.current,pcie.link.gen.max,pcie.link.width.max,"
-                 "pcie.tx_util,pcie.rx_util",
-                 "--format=csv,noheader,nounits"],
+                self._nvidia_command(
+                    "--query-gpu=name,utilization.gpu,memory.used,memory.total,"
+                    "temperature.gpu,power.draw,pcie.link.gen.current,"
+                    "pcie.link.width.current,pcie.link.gen.max,pcie.link.width.max,"
+                    "pcie.tx_util,pcie.rx_util",
+                    "--format=csv,noheader,nounits"),
                 text=True, timeout=2, stderr=subprocess.DEVNULL,
             )
             fields = [part.strip() for part in out.splitlines()[0].split(",")]
@@ -495,10 +787,10 @@ class GpuSystemMonitor:
         """Keep older NVIDIA drivers usable when PCIe query fields are absent."""
         try:
             out = subprocess.check_output(
-                [self._nvidia,
-                 "--query-gpu=name,utilization.gpu,memory.used,memory.total,"
-                 "temperature.gpu,power.draw",
-                 "--format=csv,noheader,nounits"],
+                self._nvidia_command(
+                    "--query-gpu=name,utilization.gpu,memory.used,memory.total,"
+                    "temperature.gpu,power.draw",
+                    "--format=csv,noheader,nounits"),
                 text=True, timeout=2, stderr=subprocess.DEVNULL,
             )
             name, util, mem_used, mem_total, temp, power = (
@@ -522,7 +814,7 @@ class GpuSystemMonitor:
     def _poll_nvidia_engines(self) -> dict[str, float]:
         try:
             out = subprocess.check_output(
-                [self._nvidia, "dmon", "-c", "1", "-s", "u"],
+                self._nvidia_command("dmon", "-c", "1", "-s", "u"),
                 text=True, timeout=2, stderr=subprocess.DEVNULL,
             )
             for line in out.splitlines():
@@ -540,32 +832,46 @@ class GpuSystemMonitor:
             pass
         return {}
 
-    def _poll_sysfs_engines(self) -> dict[str, float]:
+    def _poll_sysfs_engines(self, usage: dict) -> dict[str, float]:
         now = time.monotonic()
-        busy = self._collect_engine_busy_ns()
+        prev = self._prev_engine_usage
         engines: dict[str, float] = {}
-        if self._prev_engine_time is not None:
+        if prev is not None and self._prev_engine_time is not None:
             dt = now - self._prev_engine_time
+            percents: dict[str, float] = {}
             if dt > 0:
-                for engine, ns in busy.items():
-                    prev_ns = self._prev_engine_busy.get(engine, ns)
-                    delta = ns - prev_ns
+                for engine, ns in usage["ns"].items():
+                    delta = ns - prev["ns"].get(engine, ns)
                     if delta >= 0:
-                        percent = max(0.0, min(100.0, delta / (dt * 1e9) * 100))
-                        label = _GPU_ENGINE_LABELS.get(engine, engine)
-                        engines[label] = engines.get(label, 0.0) + percent
-        self._prev_engine_busy = busy
+                        percents[engine] = delta / (dt * 1e9) * 100
+            for engine, cycles in usage["cycles"].items():
+                # xe: busy cycles over elapsed GPU cycles.
+                delta = cycles - prev["cycles"].get(engine, cycles)
+                elapsed = (usage["total_cycles"].get(engine, 0)
+                           - prev["total_cycles"].get(engine, 0))
+                if delta >= 0 and elapsed > 0:
+                    percents[engine] = delta / elapsed * 100
+            for engine, percent in percents.items():
+                # i915/xe add up all engines of a class (e.g. two video engines).
+                percent /= max(1, usage["capacity"].get(engine, 1))
+                label = _GPU_ENGINE_LABELS.get(engine, engine)
+                engines[label] = engines.get(label, 0.0) + max(0.0, min(100.0, percent))
+        self._prev_engine_usage = usage
         self._prev_engine_time = now
         return engines
 
     @staticmethod
-    def _collect_engine_busy_ns() -> dict[str, int]:
-        """Sum drm-engine-* busy-ns across all processes, deduped by DRM client."""
-        busy: dict[str, int] = {}
+    def _collect_drm_usage(pci_slot: str | None = None, only_drm_card: bool = True) -> dict:
+        """Sum the fdinfo counters (see _parse_drm_fdinfo) of one GPU across all
+        processes, deduped by DRM client.
+
+        Clients of other GPUs are told apart by drm-pdev; those without it (old
+        kernels) only count when this is the sole DRM card."""
+        total = {"ns": {}, "cycles": {}, "total_cycles": {}, "capacity": {}, "vram_kib": None}
         try:
             pid_list = os.listdir("/proc")
         except OSError:
-            return busy
+            return total
         for pid_str in pid_list:
             if not pid_str.isdigit():
                 continue
@@ -583,22 +889,49 @@ class GpuSystemMonitor:
                     continue
                 if "drm-driver:" not in content:
                     continue
+                pdev_match = _DRM_PDEV_RE.search(content)
+                if pdev_match:
+                    if pci_slot is not None and pdev_match.group(1).lower() != pci_slot:
+                        continue
+                elif not only_drm_card:
+                    continue
                 client_match = _DRM_CLIENT_ID_RE.search(content)
                 client_id = f"{pid_str}:{client_match.group(1) if client_match else fd}"
                 if client_id in seen_clients:
                     continue
                 seen_clients.add(client_id)
-                for line in content.splitlines():
-                    engine_match = _DRM_ENGINE_RE.match(line)
-                    if engine_match:
-                        engine = engine_match.group(1)
-                        busy[engine] = busy.get(engine, 0) + int(engine_match.group(2))
-        return busy
+                usage = _parse_drm_fdinfo(content)
+                for key in ("ns", "cycles"):
+                    for engine, value in usage[key].items():
+                        total[key][engine] = total[key].get(engine, 0) + value
+                # GPU clock and engine count are the same for every client: not summed.
+                for key in ("total_cycles", "capacity"):
+                    for engine, value in usage[key].items():
+                        total[key][engine] = max(total[key].get(engine, 0), value)
+                if usage["vram_kib"] is not None:
+                    total["vram_kib"] = (total["vram_kib"] or 0) + usage["vram_kib"]
+        return total
+
+    def _query_vram_total(self) -> int | None:
+        """VRAM size from the i915/xe driver itself; asked only once since it never changes
+        (the query may wake a sleeping card)."""
+        if not self._vram_total_queried:
+            self._vram_total_queried = True
+            self._queried_vram_total = _drm_vram_total(self._card_path,
+                                                       self._static_info.get("driver", ""))
+        return self._queried_vram_total
 
     def _poll_sysfs(self) -> dict | None:
         percent = self._read_float(f"{self._card_path}/gpu_busy_percent")
         vram_used = self._read_float(f"{self._card_path}/mem_info_vram_used")
         vram_total = self._read_float(f"{self._card_path}/mem_info_vram_total")
+        if vram_total is None:
+            # xe (Intel Arc): per tile; often readable by root only.
+            tiles = [self._read_float(path) for path in
+                     sorted(glob.glob(f"{self._card_path}/tile*/physical_vram_size_bytes"))]
+            vram_total = sum(tiles) if tiles and None not in tiles else None
+        if vram_total is None:
+            vram_total = self._query_vram_total()
         gtt_used = self._read_float(f"{self._card_path}/mem_info_gtt_used")
         gtt_total = self._read_float(f"{self._card_path}/mem_info_gtt_total")
         temp_c = power_w = None
@@ -609,8 +942,12 @@ class GpuSystemMonitor:
             hwmon_dirs = []
         for hwmon in hwmon_dirs:
             hwmon_dir = f"{hwmon_base}/{hwmon}"
-            temp_c = self._read_float(f"{hwmon_dir}/temp1_input")
-            temp_c = temp_c / 1000 if temp_c is not None else None
+            # amdgpu/nouveau: temp1 (edge); xe: temp2 (package) / temp3 (VRAM).
+            for temp_path in _numbered_sensors(hwmon_dir, "temp"):
+                temp_c = self._read_float(temp_path)
+                if temp_c is not None:
+                    temp_c /= 1000
+                    break
             power_raw = (self._read_float(f"{hwmon_dir}/power1_average")
                          or self._read_float(f"{hwmon_dir}/power1_input"))
             power_w = power_raw / 1_000_000 if power_raw is not None else None
@@ -728,21 +1065,28 @@ class StoppableWorker(QThread):
 
 
 class GpuSystemWorker(StoppableWorker):
-    """Poll overall GPU statistics without blocking the Qt UI thread."""
+    """Poll overall statistics of every GPU without blocking the Qt UI thread."""
 
     snapshotReady = Signal(object)
 
     def __init__(self, interval: float = 0.5, parent=None):
         super().__init__(parent)
         self._interval = interval
-        self._monitor = GpuSystemMonitor()
+        self._monitors = [GpuSystemMonitor(gpu) for gpu in list_gpus()]
+
+    @property
+    def gpu_count(self) -> int:
+        return len(self._monitors)
 
     def run(self) -> None:
         while not self._stop_event.is_set():
-            snapshot = self._monitor.poll()
-            if self._stop_event.is_set():
-                return
-            self.snapshotReady.emit(snapshot)
+            # One entry per GPU (None while a GPU cannot be read), in list_gpus() order.
+            snapshots = []
+            for monitor in self._monitors:
+                snapshots.append(monitor.poll())
+                if self._stop_event.is_set():
+                    return
+            self.snapshotReady.emit(snapshots)
             self._stop_event.wait(self._interval)
 
 
@@ -834,8 +1178,8 @@ def get_cpu_temperature() -> float | None:
 def read_dmi_memory() -> str | None:
     """Output of "dmidecode -t memory" via the restricted hardware helper when available."""
     commands = []
-    helper = helper_path()
-    if os.path.exists(helper):
+    helper = sudo_helper()
+    if helper:
         commands.append(["sudo", "-n", helper, "memory"])
     dmidecode = shutil.which("dmidecode")
     if dmidecode:
@@ -939,8 +1283,8 @@ def _smartctl_disk_stats(device: str, use_sudo: bool = False, run=None) -> dict:
     run = run or _run_capture
     smartctl = shutil.which("smartctl")
     commands = []
-    helper = helper_path()
-    if os.path.exists(helper):
+    helper = smart_helper()
+    if helper:
         commands.append(["sudo", "-n", helper, device])
     if smartctl:
         command = [smartctl, "--all", "--json=o", f"/dev/{device}"]
@@ -1027,7 +1371,9 @@ class DiskSmartWorker(StoppableWorker):
                 if self._stop_event.is_set():
                     return
                 self.snapshotReady.emit(stats)
-                wait_seconds = 5.0 if not shutil.which("smartctl") else self._interval
+                # Nothing to read yet: notice a setup that is running right now.
+                readable = smart_helper() or shutil.which("smartctl")
+                wait_seconds = self._interval if readable else 5.0
                 self._stop_event.wait(wait_seconds)
         except WorkerStopped:
             pass
@@ -1208,7 +1554,7 @@ def _hwmon_sensors(ram: bool) -> list[dict[str, str | float]]:
 
 
 def list_ram_sensors() -> list[dict[str, str | float]]:
-    """The sensors on the memory modules, which the memory tab shows."""
+    """The sensors on the memory modules, which the memory view shows."""
     return _hwmon_sensors(ram=True)
 
 
@@ -1273,6 +1619,20 @@ class ProcessRow:
     num_threads: int
     gpu_percent: float | None = None  # None = no supported GPU monitoring backend found
     gpu_vram_mb: float | None = None
+    swap_mb: float | None = None  # None = could not be read
+
+
+def _process_swap_mb(pid: int) -> float | None:
+    """Swap used by one process. /proc/<pid>/status is world-readable; kernel threads have
+    no VmSwap line and no swap."""
+    try:
+        with open(f"/proc/{pid}/status", encoding="utf-8", errors="replace") as status:
+            for line in status:
+                if line.startswith("VmSwap:"):
+                    return int(line.split()[1]) / 1024
+    except (OSError, ValueError, IndexError):
+        return None
+    return 0.0
 
 
 class ProcessWorker(StoppableWorker):
@@ -1350,6 +1710,7 @@ class ProcessWorker(StoppableWorker):
             except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
                 self._procs.pop(pid, None)
                 continue
+            swap = _process_swap_mb(pid)
             gpu_info = gpu_usage.get(pid)
             rows.append(
                 ProcessRow(
@@ -1362,6 +1723,7 @@ class ProcessWorker(StoppableWorker):
                     num_threads=threads,
                     gpu_percent=(gpu_info or {}).get("gpu_percent", 0.0) if has_gpu_backend else None,
                     gpu_vram_mb=(gpu_info or {}).get("vram_mb", 0.0) if has_gpu_backend else None,
+                    swap_mb=swap,
                 )
             )
         return rows
@@ -1428,10 +1790,20 @@ def _parse_mem_to_mb(value: str) -> float:
     return float(number) * _MEM_UNIT_FACTORS_MB.get(unit, 1.0)
 
 
+# Names the fields instead of using `{{json .}}`: that one includes .Size, which makes the daemon
+# measure every container's disk usage first. With large containers that takes longer than the
+# timeout of the call, and the tab would stay empty although Docker works.
+_DOCKER_PS_FORMAT = (
+    '{"ID":{{json .ID}},"Names":{{json .Names}},"Image":{{json .Image}},"Status":{{json .Status}}}'
+)
+_DOCKER_RETRY_SECONDS = 5.0
+
+
 class DockerWorker(StoppableWorker):
     """Polls `docker ps` / `docker stats` in a background thread so the Docker tab
-    never blocks the UI. Emits `unavailable` once if the docker CLI is missing or
-    the daemon can't be reached (e.g. no permission / daemon not running)."""
+    never blocks the UI. Emits `unavailable` once if the docker CLI is missing and
+    stops. If the daemon can't be reached (e.g. no permission / daemon not running)
+    it emits `unavailable` and keeps trying, so the tab recovers on its own."""
 
     rowsReady = Signal(list)
     unavailable = Signal(str)
@@ -1453,7 +1825,8 @@ class DockerWorker(StoppableWorker):
                     return
                 if error:
                     self.unavailable.emit(error)
-                    return
+                    self._stop_event.wait(max(_DOCKER_RETRY_SECONDS, self._interval))
+                    continue
                 self.rowsReady.emit(rows)
                 self._stop_event.wait(max(0.1, self._interval))
         except WorkerStopped:
@@ -1464,7 +1837,7 @@ class DockerWorker(StoppableWorker):
             return [], N_("Docker is not installed or not in PATH.")
         try:
             ps_out = self._run_command(
-                [self._docker, "ps", "-a", "--format", "{{json .}}"],
+                [self._docker, "ps", "-a", "--format", _DOCKER_PS_FORMAT],
                 timeout=5, stderr=subprocess.STDOUT, check=True,
             ).stdout
         except subprocess.CalledProcessError as exc:

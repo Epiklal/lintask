@@ -482,7 +482,7 @@ def build_qss(theme: str, style: str = "win10") -> str:
 
 
 # (icon, page title) per main tab, used by the Windows 11 navigation pane.
-_NAV_ICONS = ["processes", "performance", "memory", "history", "sensors", "services", "docker",
+_NAV_ICONS = ["processes", "performance", "history", "sensors", "services", "docker",
               "autostart", "benchmarks", "settings"]
 
 
@@ -706,8 +706,11 @@ class MainWindow(QMainWindow):
         self.tabs = NavTabWidget()
 
         self.processes_page = ProcessesPage(self.settings)
-        self.performance_page = PerformancePage(self.settings.smart_sudo_enabled)
+        # Shown inside the performance page, when its memory tile is selected.
         self.memory_page = MemoryPage(self.settings)
+        self.performance_page = PerformancePage(
+            self.settings.smart_sudo_enabled, memory_view=self.memory_page
+        )
         self.history_page = HistoryPage(self.settings, self.history)
         self.sensors_page = SensorsPage()
         self.services_page = ServicesPage()
@@ -725,7 +728,6 @@ class MainWindow(QMainWindow):
             (self.processes_page, tr("Processes"),
              [processes_new_task, self.processes_page.header_end_task_btn]),
             (self.performance_page, tr("Performance"), [performance_new_task]),
-            (self.memory_page, tr("Memory"), None),
             (self.history_page, tr("History"), None),
             (self.sensors_page, tr("Sensors"), None),
             (self.services_page, tr("Services"), None),

@@ -229,6 +229,7 @@ def run_server(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT,
         get_cpu_temperature,
         list_physical_disks,
         list_autostart_entries,
+        list_gpus,
         list_hardware_sensors,
         list_ram_sensors,
         system_snapshot,
@@ -236,7 +237,9 @@ def run_server(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT,
     from pages.services_page import ServiceListWorker
     from pages.benchmarks_page import BenchmarkWorker
 
-    MonitoringHandler.monitor = GpuSystemMonitor()
+    # One monitor per GPU; the first one also serves older clients as "gpu".
+    gpu_monitors = [GpuSystemMonitor(gpu) for gpu in list_gpus()] or [GpuSystemMonitor({})]
+    MonitoringHandler.monitor = gpu_monitors[0]
     MonitoringHandler.snapshot = system_snapshot
     process_worker = ProcessWorker()
     docker_worker = DockerWorker()
@@ -246,8 +249,11 @@ def run_server(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT,
     def full_snapshot() -> dict:
         process_worker._sync_process_table()
         processes = [asdict(row) for row in process_worker._collect_rows()]
+        # Older clients refuse a row with a field they don't know.
+        for row in processes:
+            del row["swap_mb"]
         docker_rows, docker_error = docker_worker._collect_rows()
-        gpu = MonitoringHandler.monitor.poll()
+        gpus = [monitor.poll() for monitor in gpu_monitors]
         cpu_power = cpu_power_monitor.poll_watts()
         cpu_power_reason = cpu_power_monitor.unavailable_reason()
         return {
@@ -256,7 +262,8 @@ def run_server(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT,
             "cpu_temp_c": get_cpu_temperature(),
             "cpu_power_w": cpu_power,
             "cpu_power_reason": cpu_power_reason,
-            "gpu": gpu,
+            "gpu": gpus[0],
+            "gpus": gpus,
             "processes": processes,
             "sensors": list_hardware_sensors(),
             "ram_sensors": list_ram_sensors(),

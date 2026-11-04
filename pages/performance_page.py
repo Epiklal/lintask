@@ -15,6 +15,7 @@ from PySide6.QtWidgets import (
     QMenu,
     QPushButton,
     QStackedLayout,
+    QStackedWidget,
     QVBoxLayout,
     QWidget,
 )
@@ -35,6 +36,7 @@ from app.system_info import (
     system_snapshot,
 )
 from app.i18n import N_, format_decimal, tr
+from app.memory_info import memory_summary_rows, overview_from_remote
 from app.remote_client import RemoteSnapshotWorker
 from app.themes import WIN10_CHART_COLORS
 from widgets.live_chart import LiveChart
@@ -273,13 +275,16 @@ class StatsPanel(QWidget):
 
 class PerformancePage(QWidget):
     remoteSnapshotReady = Signal(object)
-    def __init__(self, smart_sudo_enabled: bool = False, parent=None):
+    def __init__(self, smart_sudo_enabled: bool = False, memory_view: QWidget | None = None,
+                 parent=None):
         super().__init__(parent)
 
+        self._memory_view = memory_view
         self._dark = False
         self._chart_bg: str | None = None
         self._chart_colors: dict[str, str] = dict(WIN10_CHART_COLORS)
-        self._latest_gpu: dict | None = None
+        # One snapshot per GPU (None while one cannot be read), in list_gpus() order.
+        self._latest_gpus: list[dict | None] = []
         self._remote_snapshot: dict | None = None
         self._remote_worker: RemoteSnapshotWorker | None = None
         self._remote_enabled = False
@@ -313,11 +318,15 @@ class PerformancePage(QWidget):
                 tr("Disk {index}", index=i), color, detail=d["device"]
             )
         self.tiles["network"] = ResourceTile(tr("Network"), "#e3a21a")
-        self.tiles["gpu"] = ResourceTile("GPU 0", "#c239b3")
+        # GPU 0 always gets a tile, like Windows; further GPUs (e.g. NVIDIA + AMD) add theirs.
+        gpu_keys = [f"gpu:{i}" for i in range(max(1, self._gpu_worker.gpu_count))]
+        for key in gpu_keys:
+            self.tiles[key] = ResourceTile(f"GPU {key[4:]}", "#c239b3")
 
-        self._tile_order = ["cpu", "memory", *disk_keys, "network", "gpu"]
+        self._tile_order = ["cpu", "memory", *disk_keys, "network", *gpu_keys]
 
         nav_side = QVBoxLayout()
+        self._nav_side = nav_side
         nav_side.setContentsMargins(0, 0, 0, 0)
         nav_side.setSpacing(1)
         for key in self._tile_order:
@@ -376,9 +385,13 @@ class PerformancePage(QWidget):
         self._gpu_metric_order: list[str] = [
             N_("Utilization"), *GPU_ENGINE_METRICS, N_("PCIe receive"), N_("PCIe send"),
         ]
-        self._gpu_history: dict[str, deque[float]] = {
-            metric: deque([0.0] * 60, maxlen=60) for metric in self._gpu_metric_order
-        }
+        # Per GPU: metric -> history, plus dedicated/shared memory histories.
+        self._gpu_histories: list[dict[str, deque[float]]] = []
+        self._gpu_vram_histories: list[deque[float]] = []
+        self._gpu_shared_histories: list[deque[float]] = []
+        for _key in gpu_keys:
+            self._add_gpu_histories()
+        self._shown_gpu = 0
         self._gpu_graph_count = 4
         self._gpu_slots: list[GpuGraphSlot] = []
 
@@ -387,15 +400,13 @@ class PerformancePage(QWidget):
         self.gpu_graphs_layout.setContentsMargins(0, 0, 0, 0)
         self.gpu_graphs_layout.setSpacing(4)
 
-        self.gpu_vram_history: deque[float] = deque([0.0] * 60, maxlen=60)
         self.gpu_vram_slot = GpuGraphSlot(
             N_("Dedicated GPU memory usage"), WIN10_CHART_COLORS["gpu"], fixed=True)
-        self.gpu_vram_slot.chart.set_data(self.gpu_vram_history)
+        self.gpu_vram_slot.chart.set_data(self._gpu_vram_histories[0])
         self.gpu_vram_slot.on_context_menu = self._show_gpu_context_menu
-        self.gpu_shared_history: deque[float] = deque([0.0] * 60, maxlen=60)
         self.gpu_shared_slot = GpuGraphSlot(
             N_("Shared GPU memory usage"), WIN10_CHART_COLORS["gpu"], fixed=True)
-        self.gpu_shared_slot.chart.set_data(self.gpu_shared_history)
+        self.gpu_shared_slot.chart.set_data(self._gpu_shared_histories[0])
         self.gpu_shared_slot.on_context_menu = self._show_gpu_context_menu
         self._rebuild_gpu_slots()
 
@@ -410,15 +421,24 @@ class PerformancePage(QWidget):
         detail_layout.setSpacing(2)
         detail_layout.addLayout(title_row)
         detail_layout.addSpacing(8)
-        detail_layout.addLayout(axis_top)
-        detail_layout.addWidget(chart_area, stretch=1)
-        detail_layout.addLayout(axis_bottom)
+        chart_page = QWidget()
+        chart_page_layout = QVBoxLayout(chart_page)
+        chart_page_layout.setContentsMargins(0, 0, 0, 0)
+        chart_page_layout.setSpacing(2)
+        chart_page_layout.addLayout(axis_top)
+        chart_page_layout.addWidget(chart_area, stretch=1)
+        chart_page_layout.addLayout(axis_bottom)
+        self.detail_stack = QStackedWidget()
+        self.detail_stack.addWidget(chart_page)
+        if memory_view is not None:
+            self.detail_stack.addWidget(memory_view)
+        detail_layout.addWidget(self.detail_stack, stretch=1)
         detail_layout.addWidget(self.detail_info)
         detail_container = QFrame()
         detail_container.setLayout(detail_layout)
 
         for key, tile in self.tiles.items():
-            tile.mousePressEvent = lambda _e, k=key: self._select(k)
+            self._connect_tile(key, tile)
 
         root = QHBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
@@ -431,7 +451,8 @@ class PerformancePage(QWidget):
             "cpu": "#00b7c3", "memory": "#68217a", "network": "#e3a21a", "gpu": "#c239b3",
         }
         self._labels = {
-            "cpu": "CPU", "memory": tr("Memory"), "network": tr("Network"), "gpu": "GPU",
+            "cpu": "CPU", "memory": tr("Memory"), "network": tr("Network"),
+            **{key: f"GPU {key[4:]}" for key in gpu_keys},
         }
         for i, d in enumerate(self._disks):
             key = f"disk:{d['device']}"
@@ -487,8 +508,56 @@ class PerformancePage(QWidget):
             self._cores_grid.addWidget(chart, i // columns, i % columns)
             self._core_charts.append(chart)
 
+    def _connect_tile(self, key: str, tile: ResourceTile) -> None:
+        tile.mousePressEvent = lambda _e, k=key: self._select(k)
+
+    def _add_gpu_histories(self) -> None:
+        self._gpu_histories.append({
+            metric: deque([0.0] * 60, maxlen=60) for metric in self._gpu_metric_order
+        })
+        self._gpu_vram_histories.append(deque([0.0] * 60, maxlen=60))
+        self._gpu_shared_histories.append(deque([0.0] * 60, maxlen=60))
+
+    @property
+    def _gpu_history(self) -> dict[str, deque[float]]:
+        """Metric histories of the GPU whose graphs are shown."""
+        return self._gpu_histories[self._shown_gpu]
+
+    def _gpu_keys(self) -> list[str]:
+        return [key for key in self._tile_order if key.startswith("gpu:")]
+
+    def _ensure_gpu_tiles(self, count: int) -> None:
+        """Show one tile per GPU; a remote server may have more GPUs than this PC."""
+        keys = self._gpu_keys()
+        for index in range(len(keys), count):
+            key = f"gpu:{index}"
+            tile = ResourceTile(f"GPU {index}", "#c239b3")
+            tile.set_theme(self._dark, self._chart_bg)
+            tile.chart.set_line_color(self._color_for(key))
+            self._connect_tile(key, tile)
+            self.tiles[key] = tile
+            # Below the last tile, above the stretch.
+            self._nav_side.insertWidget(self._nav_side.count() - 1, tile)
+            self._tile_order.append(key)
+            self._labels[key] = f"GPU {index}"
+            self._history[key] = deque([0.0] * 60, maxlen=60)
+            self._last_text[key] = ""
+            self._subtitles[key] = ""
+            self._add_gpu_histories()
+        for index, key in enumerate(self._gpu_keys()):
+            self.tiles[key].setVisible(index == 0 or index < count)
+        if self._kind(self._selected) == "gpu" and self.tiles[self._selected].isHidden():
+            self._select("cpu")
+
+    def _show_gpu_graphs(self, index: int) -> None:
+        self._shown_gpu = index
+        for slot in self._gpu_slots:
+            slot.chart.set_data(self._gpu_history[slot.metric_name])
+        self.gpu_vram_slot.chart.set_data(self._gpu_vram_histories[index])
+        self.gpu_shared_slot.chart.set_data(self._gpu_shared_histories[index])
+
     def _update_chart_stack(self) -> None:
-        if self._selected == "gpu":
+        if self._kind(self._selected) == "gpu":
             self.chart_stack.setCurrentIndex(2)
         elif self._selected == "cpu" and self._show_per_core:
             self.chart_stack.setCurrentIndex(1)
@@ -526,8 +595,9 @@ class PerformancePage(QWidget):
                                          _GPU_GRAPH_COLUMNS)
 
     def _ensure_gpu_metric_history(self, metric: str) -> None:
-        if metric not in self._gpu_history:
-            self._gpu_history[metric] = deque([0.0] * 60, maxlen=60)
+        for history in self._gpu_histories:
+            if metric not in history:
+                history[metric] = deque([0.0] * 60, maxlen=60)
         if metric not in self._gpu_metric_order:
             self._gpu_metric_order.append(metric)
 
@@ -575,16 +645,19 @@ class PerformancePage(QWidget):
         self.detail_chart.set_max_value(100.0)
         self.detail_chart.set_line_color(self._color_for(key))
         self.detail_chart.set_data(self._history[key])
+        if self._kind(key) == "gpu":
+            self._show_gpu_graphs(int(key[4:]))
         is_network = key == "network"
         self.detail_chart.set_auto_scale(is_network, _NET_SCALE_FLOOR_KBIT)
         self.detail_chart.set_secondary_data(self._net_send_history if is_network else None)
         # The GPU view has its own captions per graph, like Windows 10.
         for label in (self.axis_top_left, self.axis_top_right,
                       self.axis_bottom_left, self.axis_bottom_right):
-            label.setVisible(key != "gpu")
+            label.setVisible(self._kind(key) != "gpu")
         self._update_axis_max()
         self.detail_info.set_text(self._last_text[key])
         self.core_toggle_btn.setVisible(key == "cpu")
+        self.detail_stack.setCurrentIndex(1 if key == "memory" and self._memory_view else 0)
         self._update_chart_stack()
 
     def _update_axis_max(self) -> None:
@@ -595,24 +668,29 @@ class PerformancePage(QWidget):
 
     @staticmethod
     def _kind(key: str) -> str:
-        return "disk" if key.startswith("disk:") else key
+        return key.split(":", 1)[0]
 
     def _color_for(self, key: str) -> str:
         return self._chart_colors[self._kind(key)]
 
-    def _on_gpu_snapshot_ready(self, gpu: dict | None) -> None:
+    def _on_gpu_snapshot_ready(self, gpus: list[dict | None]) -> None:
         if not self._remote_enabled:
-            self._latest_gpu = gpu
+            self._latest_gpus = list(gpus)
 
     def _on_remote_snapshot_ready(self, payload: dict) -> None:
         self._remote_snapshot = payload
-        gpu = payload.get("gpu")
-        if gpu and gpu.get("engines"):
-            gpu["engines"] = {
-                _LEGACY_GPU_ENGINES.get(name, name): value
-                for name, value in gpu["engines"].items()
-            }
-        self._latest_gpu = gpu
+        # Servers before multi-GPU support only send "gpu".
+        gpus = payload.get("gpus")
+        if not isinstance(gpus, list):
+            gpus = [payload.get("gpu")] if payload.get("gpu") else []
+        for gpu in gpus:
+            if gpu and gpu.get("engines"):
+                gpu["engines"] = {
+                    _LEGACY_GPU_ENGINES.get(name, name): value
+                    for name, value in gpu["engines"].items()
+                }
+        self._latest_gpus = gpus
+        self._ensure_gpu_tiles(len(gpus))
         remote_disks = payload.get("disks")
         if remote_disks:
             for index, local_disk in enumerate(self._disks):
@@ -628,8 +706,9 @@ class PerformancePage(QWidget):
                 )
                 if selected_index >= len(remote_disks):
                     self._select("cpu")
-        if self._latest_gpu and self._latest_gpu.get("name"):
-            self.tiles["gpu"].set_detail(self._latest_gpu["name"])
+        for key, gpu in zip(self._gpu_keys(), gpus):
+            if gpu and gpu.get("name"):
+                self.tiles[key].set_detail(gpu["name"])
         for index, disk in enumerate(payload.get("disks") or []):
             if index >= len(self._disks):
                 break
@@ -654,7 +733,8 @@ class PerformancePage(QWidget):
             self._remote_worker = None
         self._remote_snapshot = None
         if not enabled:
-            self._latest_gpu = None
+            self._latest_gpus = []
+            self._ensure_gpu_tiles(self._gpu_worker.gpu_count)
             for disk in self._disks:
                 tile = self.tiles.get(f"disk:{disk['device']}")
                 if tile is not None:
@@ -716,10 +796,16 @@ class PerformancePage(QWidget):
 
         net_info = get_primary_network_info()
 
-        gpu = self._latest_gpu
-        gpu_percent = gpu["percent"] if gpu else 0.0
-        self.tiles["gpu"].update_value(gpu_percent)
-        self._update_gpu_graphs(gpu, gpu_percent)
+        gpu_values = {}
+        for index, key in enumerate(self._gpu_keys()):
+            gpu = self._latest_gpus[index] if index < len(self._latest_gpus) else None
+            gpu_percent = (gpu or {}).get("percent") or 0.0
+            self.tiles[key].update_value(gpu_percent)
+            self._record_gpu(index, gpu, gpu_percent)
+            gpu_values[key] = (gpu_percent, self._format_gpu_text(gpu, gpu_percent))
+            self._subtitles[key] = (gpu or {}).get("name", "")
+            self.tiles[key].set_detail(self._subtitles[key])
+        self._update_gpu_slots()
 
         cpu_freq_ghz = (snap["cpu_freq_mhz"] or 0) / 1000
         cpu_temp = get_cpu_temperature()
@@ -750,11 +836,10 @@ class PerformancePage(QWidget):
             "memory": (
                 snap["mem_percent"],
                 f"{tr('Utilization')}: {snap['mem_percent']:.0f}%<br>"
-                f"{tr('In use')}: {format_decimal(snap['mem_used_gb'])} GB<br>"
-                f"{tr('Available')}: {format_decimal(snap['mem_available_gb'])} GB<br>"
-                f"{tr('Cached')}: {format_decimal(snap['mem_cached_gb'])} GB<br>"
-                f"{tr('Total')}: {format_decimal(snap['mem_total_gb'])} GB<br>"
-                f"{tr('Speed')}: "
+                + "".join(f"{label}: {value}<br>" for label, value in memory_summary_rows(
+                    self._memory_view.overview if self._memory_view
+                    else overview_from_remote(snap)))
+                + f"{tr('Speed')}: "
                 f"{_format_or_na(self._ram_speed_mhz, '.0f', ' MT/s')}<br>"
                 f"{tr('RAM temperature')}: {_format_or_na(self._ram_temp_c, '.0f', '°C')}"
                 f"{tr(' ({count} modules)', count=self._ram_temp_sensor_count) if self._ram_temp_sensor_count else ''}",
@@ -772,10 +857,7 @@ class PerformancePage(QWidget):
                     f"{tr('Total received')}: {snap['net_recv'] / (1024 ** 2):.0f} MB"
                 ) if sent_rate is not None and net_info else "",
             ),
-            "gpu": (
-                gpu_percent,
-                self._format_gpu_text(gpu, gpu_percent),
-            ),
+            **gpu_values,
         }
         for i, d in enumerate(self._disks):
             key = f"disk:{d['device']}"
@@ -786,9 +868,7 @@ class PerformancePage(QWidget):
         self._subtitles["cpu"] = cpu_model
         self._subtitles["memory"] = f"{format_decimal(snap['mem_total_gb'])} GB"
         self._subtitles["network"] = net_info["name"] if net_info else ""
-        self._subtitles["gpu"] = (gpu or {}).get("name", "")
         self.tiles["network"].set_detail(self._subtitles["network"])
-        self.tiles["gpu"].set_detail(self._subtitles["gpu"])
         for i, d in enumerate(self._disks):
             kind = ", ".join(p for p in (d.get("interface", ""), d.get("kind", "")) if p)
             self._subtitles[f"disk:{d['device']}"] = d.get("model", "") + (f" ({kind})" if kind else "")
@@ -856,8 +936,13 @@ class PerformancePage(QWidget):
         vram_total = gpu.get("vram_total_mb")
         gtt_used = gpu.get("gtt_used_mb")
         gtt_total = gpu.get("gtt_total_mb")
-        dedicated = (f"{_format_gb(vram_used)}/{_format_gb(vram_total)} GB"
-                     if vram_used is not None and vram_total is not None else tr("Not available"))
+        if vram_used is not None and vram_total is not None:
+            dedicated = f"{_format_gb(vram_used)}/{_format_gb(vram_total)} GB"
+        elif vram_used is not None:
+            # Intel Arc on i915: usage is known from fdinfo, the size is not.
+            dedicated = f"{_format_gb(vram_used)} GB"
+        else:
+            dedicated = tr("Not available")
         shared = (f"{_format_gb(gtt_used)}/{_format_gb(gtt_total)} GB"
                   if gtt_used is not None and gtt_total is not None else tr("Not available"))
         known = [(u, t) for u, t in ((vram_used, vram_total), (gtt_used, gtt_total))
@@ -916,24 +1001,40 @@ class PerformancePage(QWidget):
                else tr(gpu.get("power_reason") or N_("Not available")))
         )
 
-    def _update_gpu_graphs(self, gpu: dict | None, gpu_percent: float) -> None:
-        engines = (gpu or {}).get("engines") or {}
-        for label in engines:
-            self._ensure_gpu_metric_history(label)
-
+    @staticmethod
+    def _gpu_metric_values(gpu: dict | None, gpu_percent: float) -> dict[str, float | None]:
         pcie = (gpu or {}).get("pcie") or {}
-        current_values = {
+        return {
             N_("Utilization"): gpu_percent,
-            **engines,
+            **((gpu or {}).get("engines") or {}),
             N_("PCIe receive"): pcie.get("rx_mb_s"),
             N_("PCIe send"): pcie.get("tx_mb_s"),
         }
+
+    def _record_gpu(self, index: int, gpu: dict | None, gpu_percent: float) -> None:
+        """Append one sample of GPU `index` to its graph histories."""
+        current_values = self._gpu_metric_values(gpu, gpu_percent)
+        for label in (gpu or {}).get("engines") or {}:
+            self._ensure_gpu_metric_history(label)
         for metric, value in current_values.items():
-            history = self._gpu_history.get(metric)
+            history = self._gpu_histories[index].get(metric)
             if history is not None and value is not None:
                 history.append(max(0.0, min(value, 100.0)))
+        vram_used = gpu.get("vram_used_mb") if gpu else None
+        vram_total = gpu.get("vram_total_mb") if gpu else None
+        vram_percent = (vram_used / vram_total * 100) if vram_used is not None and vram_total else 0.0
+        self._gpu_vram_histories[index].append(max(0.0, min(vram_percent, 100.0)))
+        gtt_used = gpu.get("gtt_used_mb") if gpu else None
+        gtt_total = gpu.get("gtt_total_mb") if gpu else None
+        gtt_percent = (gtt_used / gtt_total * 100) if gtt_used is not None and gtt_total else 0.0
+        self._gpu_shared_histories[index].append(max(0.0, min(gtt_percent, 100.0)))
 
-        show_gpu = self._selected == "gpu"
+    def _update_gpu_slots(self) -> None:
+        """Refresh the graph captions of the GPU whose graphs are shown."""
+        index = self._shown_gpu
+        gpu = self._latest_gpus[index] if index < len(self._latest_gpus) else None
+        current_values = self._gpu_metric_values(gpu, (gpu or {}).get("percent") or 0.0)
+        show_gpu = self._kind(self._selected) == "gpu"
         for slot in self._gpu_slots:
             value = current_values.get(slot.metric_name)
             slot.value_label.setText(f"{value:.0f}%" if value is not None else "–")
@@ -942,16 +1043,10 @@ class PerformancePage(QWidget):
             if show_gpu:
                 slot.chart.update()
 
-        vram_used = gpu.get("vram_used_mb") if gpu else None
         vram_total = gpu.get("vram_total_mb") if gpu else None
-        vram_percent = (vram_used / vram_total * 100) if vram_used is not None and vram_total else 0.0
-        self.gpu_vram_history.append(max(0.0, min(vram_percent, 100.0)))
         self.gpu_vram_slot.value_label.setText(
             f"{_format_gb(vram_total)} GB" if vram_total else tr("Not available"))
-        gtt_used = gpu.get("gtt_used_mb") if gpu else None
         gtt_total = gpu.get("gtt_total_mb") if gpu else None
-        gtt_percent = (gtt_used / gtt_total * 100) if gtt_used is not None and gtt_total else 0.0
-        self.gpu_shared_history.append(max(0.0, min(gtt_percent, 100.0)))
         self.gpu_shared_slot.value_label.setText(
             f"{_format_gb(gtt_total)} GB" if gtt_total else tr("Not available"))
         for slot in (self.gpu_vram_slot, self.gpu_shared_slot):

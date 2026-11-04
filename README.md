@@ -65,15 +65,14 @@ The screenshots show the German interface.
 
 - **Processes** with Windows-style grouping, heat map, overall usage in the column
   headers, search, end task, run new task and drag & drop to start programs.
-- **Memory** graphs for RAM and swap, what really uses your RAM, hints on programs holding
-  a lot of it, and ending a program or moving it to swap on request. Nothing happens
-  automatically. A data view lists everything else: kernel figures, swap devices, every
-  module and the module temperatures.
 - **History** of CPU, memory, swap, disks, network, temperatures and GPU, kept for up to a
   year in a small local file. Also shows the history of a server in remote mode.
 - **Performance** graphs for CPU (overall or per logical processor), memory, every
   physical disk, network (auto-scaled, send/receive) and GPU (selectable engines,
   dedicated and shared memory).
+- **Memory view** under Performance with one graph for RAM and swap and a plain rating of
+  whether memory is actually tight. A data view lists everything else: kernel figures,
+  swap devices, every module and the module temperatures.
 - **Detailed hardware data**: CPU temperature and frequency, RAM speed and module
   temperature, SMART disk data, GPU model, driver, temperature, power and PCIe link.
 - **Sensors**, **systemd services**, **Docker containers** (start/stop/restart/remove,
@@ -140,8 +139,8 @@ without typing your password every time. (The .deb already ships the helper as
 `/usr/lib/lintask/lintask-smartctl`; the button then only adds
 the sudo rule and the udev rule.) The helper can only run `smartctl` on
 block devices and `dmidecode -t memory`, move the memory of *your own* processes to
-swap, and empty the page cache; the last two only happen when you ask for them on the
-Memory tab. The button also makes the CPU energy counters
+swap, and empty the page cache; the last two only happen when you ask for them in the
+process list or the memory view. The button also makes the CPU energy counters
 (RAPL, `/sys/class/powercap/intel-rapl*:*/energy_uj`, on Intel and AMD) readable
 for your user group, right away and on every boot through a udev rule
 (`/etc/udev/rules.d/99-lintask-rapl.rules`, works with systemd-udevd and
@@ -335,7 +334,7 @@ The package installs:
 | `/usr/share/lintask/` | The application (`main.py`, `app/`, `pages/`, `widgets/`), byte-compiled on installation |
 | `/usr/bin/lintask` | Launcher; `lintask --server` starts the server mode |
 | `/usr/share/applications/lintask.desktop` | Menu entry **Lintask** |
-| `/usr/libexec/lintask/lintask-smartctl` | Helper for SMART and RAM data and the actions on the Memory tab; **Set up hardware data with sudo** then only adds the sudo rule and the udev rule |
+| `/usr/libexec/lintask/lintask-smartctl` | Helper for SMART and RAM data, *Move to swap* and emptying the cache; **Set up hardware data with sudo** then only adds the sudo rule and the udev rule |
 | `/usr/libexec/lintask/setup-venv` | Sets up PySide6 (system packages or `/opt/lintask/venv`); runs automatically during installation |
 | `/opt/lintask/venv/` | Only on Ubuntu/Linux Mint: virtual environment with PySide6 from PyPI; removed together with the package |
 | `/usr/lib/systemd/system/lintask-server.service` | systemd service for the server mode, not enabled by default (see [Remote monitoring](#remote-monitoring-server-mode)) |
@@ -372,7 +371,7 @@ The installed layout matches the Debian package, with these differences:
 
 | Path | Content |
 | --- | --- |
-| `/usr/lib/lintask/lintask-smartctl` | Helper for SMART and RAM data and the actions on the Memory tab (the .deb uses `/usr/libexec/`); **Set up hardware data with sudo** then only adds the sudo rule and the udev rule |
+| `/usr/lib/lintask/lintask-smartctl` | Helper for SMART and RAM data, *Move to swap* and emptying the cache (the .deb uses `/usr/libexec/`); **Set up hardware data with sudo** then only adds the sudo rule and the udev rule |
 | `/usr/lib/systemd/system/lintask-server.service` | systemd service for the server mode, not enabled by default |
 | `/etc/default/lintask-server` | Options for that service, e.g. the token; readable by root only (mode 600), kept as a `.pacsave` file on removal |
 | `/usr/share/licenses/lintask/LICENSE` | Copyright information |
@@ -535,13 +534,13 @@ package manager if you no longer need them.
 
 ## Feature guide
 
-The tab names are the English ones; the German interface shows *Prozesse*, *Arbeitsspeicher*,
+The tab names are the English ones; the German interface shows *Prozesse*,
 *Leistung*, *Sensoren*, *Dienste* and *Einstellungen* instead.
 
 ### Processes
 
-- **Columns**: Name, Status, CPU, Memory, GPU, GPU memory, PID, User,
-  Threads. Above CPU, memory, GPU and GPU memory
+- **Columns**: Name, Status, CPU, RAM, Swap, GPU, GPU memory, PID, User,
+  Threads. Above CPU, RAM, swap, GPU and GPU memory
   the header shows the overall usage, e.g. `7%` above *CPU*.
 - **Heat map**: the busier a process, the stronger its cells are colored (yellow in
   the Windows 10 design, blue in Windows 11, scheme colors otherwise).
@@ -555,6 +554,13 @@ The tab names are the English ones; the German interface shows *Prozesse*, *Arbe
   bottom right, Windows 11: page header). You are asked for confirmation; the process
   first gets a normal terminate signal and is killed only if it does not exit within
   two seconds.
+- **Move to swap** (right-click a process or group): asks first; the program keeps running,
+  but its memory moves to swap and it reacts slowly the next time it is used. This needs
+  swap and the setup under **Settings → Set up hardware data with sudo**. Only your own
+  processes are touched, and processes that protect their memory are left alone. Programs
+  of other users, Lintask itself and programs the desktop needs cannot be moved. The amount
+  shown is what reached swap; memory shared with other programs stays in RAM, and
+  *available* may not rise until the system needs the space.
 - **Run new task**: enter a command, e.g. `firefox` or
   `gnome-terminal --working-directory=/tmp` (Windows 10: menu *File*, Windows 11:
   page header).
@@ -565,26 +571,15 @@ The tab names are the English ones; the German interface shows *Prozesse*, *Arbe
 
 ### Memory
 
-Shows what uses your RAM right now and lets you act on it. Nothing is ended, moved or
-emptied without you asking for it.
+Open **Performance** and select **Memory** on the left. Which program holds how much is in
+the [Processes](#processes) tab, in the *RAM* and *Swap* columns.
 
-- **Overview**: memory in use, available now, cache, swap and memory pressure, with a
-  plain rating of whether memory is actually tight. Cache is not counted as used, because
-  Linux gives it back on its own as soon as programs need it.
-- **Programs**: processes combined per program with their RAM and swap, largest first.
-  The *Note* column marks programs that have been idle for a while, belong to another
-  user or are needed by the desktop.
-- **Hints**: name programs that hold a lot of memory or have been idle for a long time.
-  They are suggestions only.
-- **End program**: asks first, sends a normal terminate signal and offers to force the
-  program to end only if it is still running afterwards. Programs of other users, Lintask
-  itself and programs the desktop needs cannot be ended here.
-- **Move to swap**: the program keeps running, but its memory moves to swap and it
-  reacts slowly the next time it is used. This needs swap and the setup under **Settings
-  → Set up hardware data with sudo**. Only your own processes are touched, and processes
-  that protect their memory are left alone. The amount shown is what reached swap; memory
-  shared with other programs stays in RAM, and *available* may not rise until the system
-  needs the space.
+- **Graph**: RAM as a solid line and swap as a dashed line in one graph, like receive and
+  send under Network.
+- **Values below the graph**: memory in use, available now, cache, swap and memory
+  pressure, with a plain rating of whether memory is actually tight. Cache is not counted
+  as used, because Linux gives it back on its own as soon as programs need it. Memory
+  pressure stays *Unknown* on a kernel without `/proc/pressure/memory`.
 - **Emptying the cache** is off unless you tick *Offer to empty the cache*, and it warns
   you before it runs. It rarely helps: programs and files load more slowly until the
   cache has filled up again. It needs the same setup.
@@ -783,13 +778,13 @@ Open **Settings → Remote server**, enable **Use data from the server**,
 enter the server IP, port and access token, and click **Apply server
 connection**. The token is stored in your settings file, which only you can read.
 
-While connected, these tabs show the **server's** data: Processes, Memory, Performance,
+While connected, these tabs show the **server's** data: Processes, Performance,
 Sensors, Services, Docker and Autostart. Benchmarks started on the Benchmarks tab
 run **on the server**. Disable the checkbox to go back to local data.
 
-In remote mode the application is **read-only**: *Task beenden*, the actions on the
-Memory tab, autostart changes and Docker start/stop/restart/remove are disabled, because they would act on your
-local machine rather than on the server. Local-only things such as Docker favorites,
+In remote mode the application is **read-only**: *Task beenden*, the actions in the
+memory view, autostart changes and Docker start/stop/restart/remove are disabled, because
+they would act on your local machine rather than on the server. Local-only things such as Docker favorites,
 names and pictures still work.
 
 ### 4. Run the server permanently (systemd)
@@ -940,7 +935,9 @@ than guessed.
   readable for your user group. In a virtual machine there is usually no sensor.
 - **GPU** metrics use `nvidia-smi` for NVIDIA hardware and the Linux DRM/sysfs
   interface for AMD, Intel, and Nouveau drivers. Which engines are available depends
-  on the driver. The model name is read with `lspci`. Intel integrated graphics
+  on the driver. AMD model names come from libdrm's `amdgpu.ids` (device ID and
+  revision), with a copy in the package for systems whose list is too old; other
+  cards use `lspci`. Intel integrated graphics
   have no own power sensor; their draw comes from the RAPL `uncore` zone (needs the
   same setup as the CPU) and their utilization from the busiest engine. Old NVIDIA
   cards (e.g. Fermi) report many values as *Not Supported* in `nvidia-smi`; those

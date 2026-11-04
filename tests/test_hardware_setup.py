@@ -133,24 +133,71 @@ class TestSetupScriptRun(unittest.TestCase):
         self.assertFalse(any(LEGACY_SUDOERS in call for call in sudo_calls))
 
 
-class TestHelperPath(unittest.TestCase):
-    def path_with_executables(self, *executables):
-        with mock.patch.object(hardware_setup.os, "access",
-                               side_effect=lambda path, _mode: path in executables):
-            return hardware_setup.helper_path()
+# What sudo prints for a user with a full sudo rule and the rule from before the rename.
+LEGACY_LISTING = f"""Passende Defaults-Einträge für alice auf host:
+    env_reset, mail_badpass, secure_path=/usr/sbin\\:/usr/bin
+
+Der Benutzer alice darf die folgenden Befehle auf host ausführen:
+    (ALL : ALL) ALL
+    (root) NOPASSWD: {LEGACY_HELPER} *
+"""
+
+
+class TestPasswordlessCommands(unittest.TestCase):
+    def test_rule_that_asks_for_the_password_does_not_count(self):
+        self.assertEqual(hardware_setup._passwordless_commands("    (ALL : ALL) ALL\n"), set())
+
+    def test_command_without_its_arguments(self):
+        self.assertEqual(hardware_setup._passwordless_commands(LEGACY_LISTING), {LEGACY_HELPER})
+
+    def test_tag_holds_for_all_commands_of_the_line(self):
+        listing = "    (root) NOPASSWD: /a *, /b\n"
+        self.assertEqual(hardware_setup._passwordless_commands(listing), {"/a", "/b"})
+
+    def test_other_tags_are_skipped(self):
+        for line in ("(root) SETENV: NOPASSWD: /a", "(root) NOPASSWD: SETENV: /a"):
+            with self.subTest(line=line):
+                self.assertEqual(hardware_setup._passwordless_commands(line), {"/a"})
+
+    def test_passwd_tag_ends_it(self):
+        listing = "    (root) NOPASSWD: /a, PASSWD: /b, /c\n"
+        self.assertEqual(hardware_setup._passwordless_commands(listing), {"/a"})
+
+    def test_all_commands(self):
+        self.assertEqual(hardware_setup._passwordless_commands("(ALL) NOPASSWD: ALL"), {"ALL"})
+
+
+class TestHelperChoice(unittest.TestCase):
+    def helpers(self, listing, *executables):
+        """(sudo_helper, smart_helper) with these files installed and this sudo listing."""
+        with (mock.patch.object(hardware_setup.os, "access",
+                                side_effect=lambda path, _mode: path in executables),
+              mock.patch.object(hardware_setup, "_sudo_listing", return_value=listing)):
+            return hardware_setup.sudo_helper(), hardware_setup.smart_helper()
+
+    def test_packaged_helper_without_its_rule_is_not_run(self):
+        self.assertEqual(self.helpers("    (ALL : ALL) ALL\n", PACKAGED_HELPERS[0]), (None, None))
+
+    def test_rule_from_before_the_rename_reads_only_smart_data(self):
+        self.assertEqual(self.helpers(LEGACY_LISTING, PACKAGED_HELPERS[0], LEGACY_HELPER),
+                         (None, LEGACY_HELPER))
+
+    def test_rule_of_a_removed_helper_is_not_used(self):
+        self.assertEqual(self.helpers(LEGACY_LISTING, PACKAGED_HELPERS[0]), (None, None))
 
     def test_packaged_helper_comes_first(self):
-        self.assertEqual(self.path_with_executables(PACKAGED_HELPERS[0], LEGACY_HELPER),
-                         PACKAGED_HELPERS[0])
+        listing = f"(root) NOPASSWD: {PACKAGED_HELPERS[0]} *\n(root) NOPASSWD: {LEGACY_HELPER} *"
+        self.assertEqual(self.helpers(listing, PACKAGED_HELPERS[0], LEGACY_HELPER),
+                         (PACKAGED_HELPERS[0], PACKAGED_HELPERS[0]))
 
     def test_new_helper_comes_before_the_old_one(self):
-        self.assertEqual(self.path_with_executables(HELPER_TARGET, LEGACY_HELPER), HELPER_TARGET)
+        listing = f"(root) NOPASSWD: {HELPER_TARGET} *\n(root) NOPASSWD: {LEGACY_HELPER} *"
+        self.assertEqual(self.helpers(listing, HELPER_TARGET, LEGACY_HELPER),
+                         (HELPER_TARGET, HELPER_TARGET))
 
-    def test_setup_from_before_the_rename_keeps_working(self):
-        self.assertEqual(self.path_with_executables(LEGACY_HELPER), LEGACY_HELPER)
-
-    def test_without_any_helper_the_setup_target_is_named(self):
-        self.assertEqual(self.path_with_executables(), HELPER_TARGET)
+    def test_rule_for_all_commands_is_enough(self):
+        self.assertEqual(self.helpers("(ALL) NOPASSWD: ALL", PACKAGED_HELPERS[0]),
+                         (PACKAGED_HELPERS[0], PACKAGED_HELPERS[0]))
 
     def test_setup_never_writes_a_rule_for_the_old_helper(self):
         with mock.patch.object(hardware_setup.os, "access",
@@ -158,6 +205,56 @@ class TestHelperPath(unittest.TestCase):
             script = hardware_setup.setup_script("/src/helper", "alice", "alice")
         self.assertIn(f"NOPASSWD: {HELPER_TARGET} *", script)
         self.assertNotIn(f"NOPASSWD: {LEGACY_HELPER}", script)
+
+
+class TestSudoListing(unittest.TestCase):
+    def setUp(self):
+        self.modified = 1
+        self.now = 1000.0
+        self.result = subprocess.CompletedProcess([], 0, stdout=LEGACY_LISTING)
+        patches = [
+            mock.patch.object(hardware_setup, "_sudo_listing_cache", None),
+            mock.patch.object(hardware_setup, "_modified", side_effect=lambda _path: self.modified),
+            mock.patch.object(hardware_setup.time, "monotonic", side_effect=lambda: self.now),
+        ]
+        for patch in patches:
+            patch.start()
+            self.addCleanup(patch.stop)
+        run = mock.patch.object(hardware_setup.subprocess, "run",
+                                side_effect=lambda *_args, **_kwargs: self.result)
+        self.run_mock = run.start()
+        self.addCleanup(run.stop)
+
+    def test_sudo_is_asked_once(self):
+        self.assertEqual(hardware_setup._sudo_listing(), LEGACY_LISTING)
+        self.assertEqual(hardware_setup._sudo_listing(), LEGACY_LISTING)
+        self.assertEqual(self.run_mock.call_count, 1)
+        self.assertEqual(self.run_mock.call_args.args[0], ["sudo", "-n", "-l"])
+
+    def test_changed_rules_are_read_again(self):
+        hardware_setup._sudo_listing()
+        self.modified = 2
+        hardware_setup._sudo_listing()
+        self.assertEqual(self.run_mock.call_count, 2)
+
+    def test_old_listing_is_read_again(self):
+        hardware_setup._sudo_listing()
+        self.now += hardware_setup._SUDO_LISTING_MAX_AGE
+        hardware_setup._sudo_listing()
+        self.assertEqual(self.run_mock.call_count, 2)
+
+    def test_refused_listing_is_empty_and_not_retried_at_once(self):
+        self.result = subprocess.CompletedProcess([], 1, stdout="")
+        self.assertEqual(hardware_setup._sudo_listing(), "")
+        hardware_setup._sudo_listing()
+        self.assertEqual(self.run_mock.call_count, 1)
+
+    def test_failing_sudo_gives_an_empty_listing(self):
+        for error in (FileNotFoundError(), subprocess.TimeoutExpired("sudo", 3)):
+            with self.subTest(error=error):
+                hardware_setup._sudo_listing_cache = None
+                self.run_mock.side_effect = error
+                self.assertEqual(hardware_setup._sudo_listing(), "")
 
 
 class TestRaplRule(unittest.TestCase):

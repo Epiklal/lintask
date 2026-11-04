@@ -4,7 +4,7 @@ from __future__ import annotations
 import getpass
 import os
 import shlex
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import psutil
 from PySide6.QtCore import (
@@ -26,6 +26,7 @@ from PySide6.QtWidgets import (
     QHeaderView,
     QInputDialog,
     QLineEdit,
+    QMenu,
     QMessageBox,
     QPushButton,
     QStyle,
@@ -36,23 +37,27 @@ from PySide6.QtWidgets import (
 )
 
 from app.i18n import N_, format_decimal, tr
+from app.memory_info import MIB, PageOutResult, PageOutWorker, format_bytes, is_essential
 from app.system_info import ProcessRow, ProcessWorker, kill_process
 from widgets.resizable_table import ResizableRowsTableView
 
 # Column order follows the Windows 10 "Processes" tab; PID/User/Threads come last.
-COLUMNS = [N_("Name"), N_("Status"), N_("CPU"), N_("Memory"), N_("GPU"), N_("GPU memory"),
+COLUMNS = [N_("Name"), N_("Status"), N_("CPU"), N_("RAM"), N_("Swap"), N_("GPU"), N_("GPU memory"),
            N_("PID"), N_("User"), N_("Threads")]
 _COLUMN_WIDTHS_KEY = "processes_win10"
-_DEFAULT_COLUMN_WIDTHS = [280, 90, 75, 115, 75, 110, 70, 110, 70]
-_NUMERIC_COLUMNS = {2, 3, 4, 5, 6, 8}
+_DEFAULT_COLUMN_WIDTHS = [280, 90, 75, 115, 90, 75, 110, 70, 110, 70]
+_NUMERIC_COLUMNS = {2, 3, 4, 5, 6, 7, 9}
 # Windows 10 highlights cells of resource-hungry processes with a yellow heat map.
-_HEATMAP_COLUMNS = {2: 100.0, 3: 4096.0, 4: 100.0, 5: 4096.0}
+_HEATMAP_COLUMNS = {2: 100.0, 3: 4096.0, 4: 4096.0, 5: 100.0, 6: 4096.0}
 # Heat map colours (idle -> very busy) come from the colour scheme, see app.themes.
 _HEAT_RATIOS = (0.0, 0.3, 0.6, 1.0)
 _DEFAULT_HEAT = ["#fff4c4", "#ffe8a6", "#ffd27a", "#ffa04a"]  # Windows 10 yellow
 _STATUS_LABELS = {"stopped": N_("Stopped"), "zombie": N_("Zombie"), "dead": N_("Ended")}
 
 _REMOTE_ACTION_HINT = N_("In remote mode this list shows the server's data. Actions would run on this PC and are therefore locked.")
+
+# Less than this moved out of memory is not worth a success message.
+_NOTICEABLE_BYTES = 16 * MIB
 
 TOTAL_ROLE = Qt.UserRole + 1
 INDENT_ROLE = Qt.UserRole + 2
@@ -68,6 +73,10 @@ def _format_percent(value: float) -> str:
 
 def _format_mb(value: float) -> str:
     return f"{format_decimal(value)} MB"
+
+
+def _process_count(count: int) -> str:
+    return tr("1 process") if count == 1 else tr("{count} processes", count=count)
 
 
 def _scaled_font(font: QFont, factor: float) -> QFont:
@@ -119,6 +128,7 @@ class ProcessListEntry:
     count: int = 0
     indent: int = 0
     totals: ProcessRow | None = None  # summed values shown on a collapsed process group
+    members: list[ProcessRow] = field(default_factory=list)  # the processes of such a group
 
     @property
     def is_group(self) -> bool:
@@ -201,8 +211,8 @@ class ProcessTableModel(QAbstractTableModel):
 
         if role == Qt.BackgroundRole and col in _HEATMAP_COLUMNS:
             value = {
-                2: row.cpu_percent, 3: row.memory_mb,
-                4: row.gpu_percent, 5: row.gpu_vram_mb,
+                2: row.cpu_percent, 3: row.memory_mb, 4: row.swap_mb,
+                5: row.gpu_percent, 6: row.gpu_vram_mb,
             }[col]
             ratio = 0.0 if value is None else min(value / _HEATMAP_COLUMNS[col], 1.0)
             return _heat_color(ratio, self._heat)
@@ -223,14 +233,16 @@ class ProcessTableModel(QAbstractTableModel):
         if col == 3:
             return _format_mb(row.memory_mb)
         if col == 4:
-            return _format_percent(row.gpu_percent) if row.gpu_percent is not None else "–"
+            return _format_mb(row.swap_mb) if row.swap_mb is not None else "–"
         if col == 5:
-            return _format_mb(row.gpu_vram_mb) if row.gpu_vram_mb is not None else "–"
+            return _format_percent(row.gpu_percent) if row.gpu_percent is not None else "–"
         if col == 6:
-            return "" if entry.is_group else row.pid
+            return _format_mb(row.gpu_vram_mb) if row.gpu_vram_mb is not None else "–"
         if col == 7:
-            return row.username
+            return "" if entry.is_group else row.pid
         if col == 8:
+            return row.username
+        if col == 9:
             return row.num_threads
         return None
 
@@ -244,6 +256,13 @@ class ProcessTableModel(QAbstractTableModel):
             return self._rows[row].process.pid
         return None
 
+    def rows_at(self, row: int) -> list[ProcessRow]:
+        """The processes a table row stands for; none for a category header."""
+        if not 0 <= row < len(self._rows):
+            return []
+        entry = self._rows[row]
+        return [entry.process] if entry.process is not None else entry.members
+
     def toggle_group(self, row: int) -> bool:
         if not 0 <= row < len(self._rows) or not self._rows[row].is_group:
             return False
@@ -255,15 +274,18 @@ class ProcessTableModel(QAbstractTableModel):
         self._rebuild_rows()
         return True
 
-    def set_rows(self, rows: list[ProcessRow], memory_percent: float | None = None) -> None:
+    def set_rows(self, rows: list[ProcessRow], memory_percent: float | None = None,
+                 swap_percent: float | None = None) -> None:
         self._process_rows = rows
-        self._update_totals(rows, memory_percent)
+        self._update_totals(rows, memory_percent, swap_percent)
         self._rebuild_rows()
 
-    def _update_totals(self, rows: list[ProcessRow], memory_percent: float | None) -> None:
+    def _update_totals(self, rows: list[ProcessRow], memory_percent: float | None,
+                       swap_percent: float | None) -> None:
         """Overall usage printed above the column names, like Windows 10's "7% / CPU"."""
         cpu = min(100.0, sum(row.cpu_percent for row in rows) / self._cpu_count)
         memory_mb = sum(row.memory_mb for row in rows)
+        swap_values = [row.swap_mb for row in rows if row.swap_mb is not None]
         gpu_values = [row.gpu_percent for row in rows if row.gpu_percent is not None]
         vram_values = [row.gpu_vram_mb for row in rows if row.gpu_vram_mb is not None]
         self._totals = {
@@ -271,11 +293,15 @@ class ProcessTableModel(QAbstractTableModel):
             3: (f"{memory_percent:.0f}%" if memory_percent is not None
                 else f"{format_decimal(memory_mb / 1024)} GB"),
         }
+        if swap_percent is not None:
+            self._totals[4] = f"{swap_percent:.0f}%"
+        elif swap_values:
+            self._totals[4] = f"{format_decimal(sum(swap_values) / 1024)} GB"
         if gpu_values:
-            self._totals[4] = f"{min(100.0, sum(gpu_values)):.0f}%"
+            self._totals[5] = f"{min(100.0, sum(gpu_values)):.0f}%"
         if vram_values:
-            self._totals[5] = f"{format_decimal(sum(vram_values) / 1024)} GB"
-        self.headerDataChanged.emit(Qt.Horizontal, 2, 5)
+            self._totals[6] = f"{format_decimal(sum(vram_values) / 1024)} GB"
+        self.headerDataChanged.emit(Qt.Horizontal, 2, 6)
 
     def set_filter(self, value: str) -> None:
         self._filter = value.casefold()
@@ -291,10 +317,11 @@ class ProcessTableModel(QAbstractTableModel):
         key_functions = {
             0: lambda row: row.name.casefold(), 1: lambda row: row.status.casefold(),
             2: lambda row: row.cpu_percent, 3: lambda row: row.memory_mb,
-            4: lambda row: row.gpu_percent if row.gpu_percent is not None else -1,
-            5: lambda row: row.gpu_vram_mb if row.gpu_vram_mb is not None else -1,
-            6: lambda row: row.pid, 7: lambda row: row.username.casefold(),
-            8: lambda row: row.num_threads,
+            4: lambda row: row.swap_mb if row.swap_mb is not None else -1,
+            5: lambda row: row.gpu_percent if row.gpu_percent is not None else -1,
+            6: lambda row: row.gpu_vram_mb if row.gpu_vram_mb is not None else -1,
+            7: lambda row: row.pid, 8: lambda row: row.username.casefold(),
+            9: lambda row: row.num_threads,
         }
         rows.sort(key=key_functions[self._sort_column], reverse=self._sort_order == Qt.DescendingOrder)
         if self._sort_column == 0:
@@ -327,7 +354,7 @@ class ProcessTableModel(QAbstractTableModel):
             group_key = f"process:{key}:{matching_rows[0].name.casefold()}"
             target.append(ProcessListEntry(
                 group_key=group_key, label=matching_rows[0].name, count=len(matching_rows), indent=1,
-                totals=self._sum_rows(matching_rows),
+                totals=self._sum_rows(matching_rows), members=matching_rows,
             ))
             if group_key not in self._collapsed_groups:
                 target.extend(ProcessListEntry(process=row, indent=2) for row in matching_rows)
@@ -335,6 +362,7 @@ class ProcessTableModel(QAbstractTableModel):
 
     @staticmethod
     def _sum_rows(rows: list[ProcessRow]) -> ProcessRow:
+        swap = [row.swap_mb for row in rows if row.swap_mb is not None]
         gpu = [row.gpu_percent for row in rows if row.gpu_percent is not None]
         vram = [row.gpu_vram_mb for row in rows if row.gpu_vram_mb is not None]
         return ProcessRow(
@@ -344,6 +372,7 @@ class ProcessTableModel(QAbstractTableModel):
             num_threads=sum(row.num_threads for row in rows),
             gpu_percent=sum(gpu) if gpu else None,
             gpu_vram_mb=sum(vram) if vram else None,
+            swap_mb=sum(swap) if swap else None,
         )
 
 
@@ -551,6 +580,9 @@ class ProcessesPage(QWidget):
         self.table.selectionModel().selectionChanged.connect(self._on_selection_changed)
         self.table.clicked.connect(self._on_table_clicked)
         self.table.filesDropped.connect(self._start_files)
+        self.table.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.table.customContextMenuRequested.connect(self._show_context_menu)
+        self._swap_worker: PageOutWorker | None = None
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -580,8 +612,12 @@ class ProcessesPage(QWidget):
         try:
             # Keep the current selection (by PID) across the periodic refresh.
             selected_pid = self._selected_pid()
-            memory_percent = None if self._remote_enabled else psutil.virtual_memory().percent
-            self.model.set_rows(rows, memory_percent)
+            memory_percent = swap_percent = None
+            if not self._remote_enabled:
+                memory_percent = psutil.virtual_memory().percent
+                swap = psutil.swap_memory()
+                swap_percent = swap.percent if swap.total else None
+            self.model.set_rows(rows, memory_percent, swap_percent)
             if selected_pid is not None:
                 self._reselect_pid(selected_pid)
             thread_count = sum(r.num_threads for r in rows)
@@ -657,6 +693,92 @@ class ProcessesPage(QWidget):
         if not ok:
             QMessageBox.warning(self, tr("Error"), tr("The process could not be ended:\n{error}", error=tr(error)))
 
+    def _show_context_menu(self, position) -> None:
+        index = self.table.indexAt(position)
+        rows = self.model.rows_at(index.row()) if index.isValid() else []
+        if not rows:
+            return
+        menu = QMenu(self.table)
+        menu.setToolTipsVisible(True)
+        action = menu.addAction(tr("Move to swap"))
+        reason = self._swap_block_reason(rows)
+        if reason:
+            action.setEnabled(False)
+            action.setToolTip(reason)
+        action.triggered.connect(lambda: self._move_to_swap(rows))
+        menu.exec(self.table.viewport().mapToGlobal(position))
+
+    def _swap_block_reason(self, rows: list[ProcessRow]) -> str:
+        """Why these processes can't be moved to swap, empty if they can."""
+        # PIDs shown in remote mode belong to the server, like for "End task".
+        if self._remote_enabled:
+            return tr(_REMOTE_ACTION_HINT)
+        if any(row.pid == os.getpid() for row in rows):
+            return tr("Lintask cannot move itself to swap.")
+        if any(is_essential(row.name) for row in rows):
+            return tr("The desktop needs this program, so it cannot be moved to swap.")
+        if any(row.username != self.model._current_user for row in rows):
+            return tr("This program belongs to another user.")
+        if not psutil.swap_memory().total:
+            return tr("No swap is set up, so nothing can be moved out of memory.")
+        if self._swap_worker is not None:
+            return tr("Another program is being moved to swap right now.")
+        return ""
+
+    def _move_to_swap(self, rows: list[ProcessRow]) -> None:
+        if self._swap_block_reason(rows):
+            return
+        # With the start time, a PID the system has reused meanwhile is left alone.
+        processes = []
+        for row in rows:
+            try:
+                processes.append((row.pid, psutil.Process(row.pid).create_time()))
+            except psutil.Error:
+                continue
+        if not processes:
+            return
+        name = rows[0].name
+        answer = QMessageBox.question(
+            self, tr("Move to swap"),
+            tr("Move {name} ({processes}) to swap?\n\nThe program keeps running. It will react "
+               "slowly the next time it is used, while it fetches its memory back.",
+               name=name, processes=_process_count(len(processes))),
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
+        )
+        if answer != QMessageBox.Yes:
+            return
+        self._swap_worker = PageOutWorker(name, processes, parent=self)
+        self._swap_worker.resultReady.connect(self._on_swap_result)
+        self._swap_worker.start()
+
+    def _stop_swap_worker(self) -> None:
+        if self._swap_worker is None:
+            return
+        self._swap_worker.resultReady.disconnect(self._on_swap_result)
+        self._swap_worker.stop()
+        self._swap_worker.deleteLater()
+        self._swap_worker = None
+
+    def _on_swap_result(self, result: PageOutResult) -> None:
+        self._stop_swap_worker()
+        if result.error:
+            QMessageBox.warning(self, tr("Move to swap"), tr(result.error))
+            return
+        QMessageBox.information(self, tr("Move to swap"), self._swap_result_text(result))
+
+    @staticmethod
+    def _swap_result_text(result: PageOutResult) -> str:
+        if result.moved_bytes < _NOTICEABLE_BYTES:
+            text = tr("{name}: hardly anything could be moved. It is in use, shared with other "
+                      "programs or already in swap.", name=result.name)
+        else:
+            text = tr("{name}: {memory} moved to swap.", name=result.name,
+                      memory=format_bytes(result.moved_bytes))
+        if result.refused:
+            text += " " + tr("{count} of its processes protect their memory and were left alone.",
+                             count=result.refused)
+        return text
+
     def place_search_box(self, header_layout: QHBoxLayout | None) -> None:
         """Move the search box into the Windows 11 page header (or back above the list)."""
         if header_layout is None:
@@ -708,6 +830,7 @@ class ProcessesPage(QWidget):
 
     def shutdown(self) -> None:
         self._stop_worker()
+        self._stop_swap_worker()
 
     def set_refresh_interval(self, seconds: float) -> None:
         # Change the running worker instead of replacing it: no thread restart per

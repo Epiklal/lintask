@@ -25,7 +25,21 @@ class TestStartup(unittest.TestCase):
     def test_main_window_constructs_and_shows(self):
         window = MainWindow()
         window.show()
-        self.assertEqual(window.tabs.count(), 10)
+        self.assertEqual(window.tabs.count(), 9)
+        window.close()
+
+    def test_memory_view_is_part_of_the_performance_tab(self):
+        window = MainWindow()
+        window.show()
+        performance = window.performance_page
+        self.assertTrue(performance.isAncestorOf(window.memory_page))
+        window.tabs.setCurrentWidget(window.page_frames[1])
+        QApplication.processEvents()
+
+        performance._select("memory")
+        self.assertTrue(window.memory_page.isVisible())
+        performance._select("cpu")
+        self.assertFalse(window.memory_page.isVisible())
         window.close()
 
     def test_main_window_closes_without_leftover_worker_threads(self):

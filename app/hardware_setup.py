@@ -10,8 +10,12 @@ and with the common terminal emulators.
 from __future__ import annotations
 
 import os
+import re
 import shlex
 import shutil
+import subprocess
+import threading
+import time
 
 from app.i18n import tr
 
@@ -34,6 +38,11 @@ RAPL_ENERGY_GLOB = "/sys/class/powercap/intel-rapl*:*/energy_uj"
 # udev runs RUN+= programs without a PATH, so they need absolute paths. Only system
 # directories are searched; NixOS has no /bin/chgrp at all.
 _SYSTEM_BIN_PATH = "/usr/bin:/bin:/run/current-system/sw/bin"
+# A rule file edited in place leaves the directory's mtime alone, hence the time limit
+# on top. It stays long: a refused listing can be a line in the system log.
+_SUDO_RULE_SOURCES = ("/etc/sudoers", "/etc/sudoers.d")
+_SUDO_LISTING_MAX_AGE = 300.0
+_SUDO_LISTING_TIMEOUT = 3
 
 # (package manager binary, command installing smartmontools + dmidecode)
 _PACKAGE_COMMANDS = [
@@ -70,11 +79,74 @@ def _setup_helper() -> str:
     return HELPER_TARGET
 
 
-def helper_path() -> str:
-    """The privileged helper to run via sudo. A setup from before the rename keeps
-    working until the setup runs again."""
+def _modified(path: str) -> int | None:
+    try:
+        return os.stat(path).st_mtime_ns
+    except OSError:
+        return None
+
+
+_sudo_listing_lock = threading.Lock()
+_sudo_listing_cache: tuple[tuple, float, str] | None = None
+
+
+def _sudo_listing() -> str:
+    """Output of `sudo -n -l`, empty if sudo refuses it. Cached until a rule file changes."""
+    global _sudo_listing_cache
+    sources = tuple(_modified(path) for path in _SUDO_RULE_SOURCES)
+    now = time.monotonic()
+    with _sudo_listing_lock:
+        if _sudo_listing_cache is not None:
+            cached_sources, read_at, listing = _sudo_listing_cache
+            if cached_sources == sources and now - read_at < _SUDO_LISTING_MAX_AGE:
+                return listing
+        try:
+            completed = subprocess.run(["sudo", "-n", "-l"], capture_output=True, text=True,
+                                       errors="replace", timeout=_SUDO_LISTING_TIMEOUT)
+            listing = completed.stdout if completed.returncode == 0 else ""
+        except (OSError, subprocess.SubprocessError):
+            listing = ""
+        _sudo_listing_cache = (sources, now, listing)
+        return listing
+
+
+def _passwordless_commands(listing: str) -> set[str]:
+    """The commands a `sudo -l` listing allows without a password, without their arguments.
+
+    `sudo -n -l <command>` can't answer this: it also accepts a command that a rule like
+    `(ALL : ALL) ALL` allows only with the password."""
+    commands: set[str] = set()
+    for line in listing.splitlines():
+        _, tag, entries = line.partition("NOPASSWD:")
+        if not tag:
+            continue
+        # The tag holds for the following commands, until PASSWD: ends it.
+        for entry in re.split(r"\bPASSWD:", entries, maxsplit=1)[0].split(","):
+            words = re.sub(r"^\s*(?:[A-Z_]+:\s*)*", "", entry).split()
+            if words:
+                commands.add(words[0])
+    return commands
+
+
+def _runs_without_password(helper: str) -> bool:
+    if not os.access(helper, os.X_OK):
+        return False
+    commands = _passwordless_commands(_sudo_listing())
+    return helper in commands or "ALL" in commands
+
+
+def sudo_helper() -> str | None:
+    """The privileged helper, if sudo runs it without a password. Without such a rule a
+    call would only fail and fill the system log."""
     helper = _setup_helper()
-    if not os.access(helper, os.X_OK) and os.access(LEGACY_HELPER, os.X_OK):
+    return helper if _runs_without_password(helper) else None
+
+
+def smart_helper() -> str | None:
+    """The helper for SMART data. A setup from before the rename keeps working until the
+    setup runs again, but its helper reads nothing other than block devices."""
+    helper = sudo_helper()
+    if helper is None and _runs_without_password(LEGACY_HELPER):
         return LEGACY_HELPER
     return helper
 

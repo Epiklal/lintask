@@ -1,11 +1,9 @@
-"""Memory tab data: what uses RAM, what could be freed, and the actions behind it.
+"""Memory view data: the overview, everything known about the memory, and the actions behind it.
 
-Nothing in here ends a program or empties a cache on its own. The hints are suggestions,
-every action starts from an explicit click on the memory page.
+Nothing in here moves a program or empties a cache on its own: every action starts from an explicit click.
 """
 from __future__ import annotations
 
-import os
 import subprocess
 import threading
 import time
@@ -14,7 +12,7 @@ from dataclasses import dataclass, field
 import psutil
 from PySide6.QtCore import Signal
 
-from app.hardware_setup import helper_path
+from app.hardware_setup import sudo_helper
 from app.i18n import N_, format_decimal, tr
 from app.system_info import StoppableWorker, WorkerStopped, list_ram_sensors, read_dmi_memory
 
@@ -24,22 +22,17 @@ MIB = 1024 ** 2
 MEMINFO_FILE = "/proc/meminfo"
 SWAPS_FILE = "/proc/swaps"
 PRESSURE_FILE = "/proc/pressure/memory"
+_PRESSURE_TEXTS = {
+    "none": N_("None"),
+    "light": N_("Light"),
+    "high": N_("High"),
+    None: N_("Unknown"),
+}
 PRESSURE_LIGHT = 1.0
 PRESSURE_HIGH = 10.0
 TIGHT_AVAILABLE_SHARE = 0.10
 
-# A program counts as active above 1 % of one core, background ticks stay below that.
-ACTIVE_CPU_SHARE = 0.01
-
-LARGE_MIN_BYTES = GIB
-LARGE_MIN_SHARE = 0.10
-IDLE_MIN_BYTES = 300 * MIB
-IDLE_MIN_SHARE = 0.01
-IDLE_MIN_SECONDS = 600
-MAX_HINTS = 3
-
 VISIBLE_INTERVAL = 5.0
-HIDDEN_INTERVAL = 30.0
 
 # Process names are cut to 15 characters by the kernel, so the comparison is too.
 _ESSENTIAL_NAMES = frozenset(name[:15] for name in (
@@ -50,12 +43,9 @@ _ESSENTIAL_NAMES = frozenset(name[:15] for name in (
     "lxqt-session", "budgie-wm",
 ))
 _ESSENTIAL_PREFIXES = ("gnome-session",)
-OWN_PROGRAM_NAME = "Lintask"
 
 # Protection against a process with the same pid that started after the list was read.
 _CREATE_TIME_TOLERANCE = 0.01
-_END_WAIT_SECONDS = 5.0
-_END_POLL_SECONDS = 0.25
 _HELPER_TIMEOUT = 120
 _SETTLE_SECONDS = 0.5
 
@@ -85,7 +75,7 @@ def format_bytes(value: int | float) -> str:
 
 
 def is_essential(name: str) -> bool:
-    """Programs the desktop session cannot live without: no hints, no actions."""
+    """Programs the desktop session cannot live without: no actions."""
     return name[:15] in _ESSENTIAL_NAMES or name.startswith(_ESSENTIAL_PREFIXES)
 
 
@@ -102,35 +92,9 @@ class MemoryOverview:
     pressure_full: float | None = None
 
 
-@dataclass
-class ProgramRow:
-    key: tuple[str, str]
-    name: str
-    username: str
-    memory_bytes: int
-    # None unless every process could be measured exactly.
-    swap_bytes: int | None
-    exact: bool
-    processes: list[tuple[int, float]]
-    cpu_seconds: float = 0.0
-    essential: bool = False
-    own: bool = True
-    idle_seconds: float = 0.0
-
-
-@dataclass(frozen=True)
-class Hint:
-    kind: str  # "idle" or "large"
-    name: str
-    memory_bytes: int
-    idle_seconds: float = 0.0
-
-
 @dataclass(frozen=True)
 class MemorySnapshot:
     overview: MemoryOverview
-    rows: list[ProgramRow]
-    hints: list[Hint]
     ram_sensors: list[dict] = field(default_factory=list)
 
 
@@ -365,6 +329,27 @@ def _temperature_rows(ram_sensors: list[dict] | None) -> list[tuple[str, str]]:
             for number, sensor in enumerate(temperatures, 1)]
 
 
+def memory_summary_rows(overview: MemoryOverview) -> list[tuple[str, str]]:
+    """The values of the block below the graph as (label, value), already translated."""
+    if overview.swap_total is None:
+        swap = tr("Unknown")
+    elif overview.swap_total == 0:
+        swap = tr("Not set up")
+    else:
+        swap = tr("{used} of {total}", used=format_bytes(overview.swap_used or 0),
+                  total=format_bytes(overview.swap_total))
+    pressure = tr(_PRESSURE_TEXTS[pressure_level(overview)])
+    if overview.pressure_some is not None:
+        pressure += f" ({format_decimal(overview.pressure_some)} %)"
+    return [
+        (tr("In use"), format_bytes(overview.used)),
+        (tr("Available now"), format_bytes(overview.available)),
+        (tr("Cache"), format_bytes(overview.cached)),
+        (tr("Swap"), swap),
+        (tr("Memory pressure"), pressure),
+    ]
+
+
 def memory_data_sections(
     overview: MemoryOverview,
     meminfo: dict[str, int],
@@ -373,24 +358,14 @@ def memory_data_sections(
     ram_sensors: list[dict] | None,
     remote: bool = False,
 ) -> list[tuple[str, list[tuple[str, str]]]]:
-    """Everything known about the memory as (section, [(label, value)]), already translated."""
+    """What is known beyond memory_summary_rows as (section, [(label, value)]), already translated."""
     def from_meminfo(*items: tuple[str, str]) -> list[tuple[str, str]]:
         return [(tr(label), format_bytes(meminfo[key])) for label, key in items if key in meminfo]
 
-    usage = [
-        (tr("Total"), format_bytes(overview.total)),
-        (tr("In use"), format_bytes(overview.used)),
-        (tr("Available now"), format_bytes(overview.available)),
-        *from_meminfo((N_("Free"), "MemFree")),
-        (tr("Cache"), format_bytes(overview.cached)),
-        *from_meminfo((N_("Buffers"), "Buffers"), (N_("Shared"), "Shmem"),
-                      (N_("Active"), "Active"), (N_("Inactive"), "Inactive"),
-                      (N_("Waiting to be written"), "Dirty"), (N_("Being written"), "Writeback"),
-                      (N_("Mapped files"), "Mapped")),
-    ]
-    if overview.pressure_some is not None:
-        usage.append((tr("Memory pressure (1 min)"),
-                      f"{format_decimal(overview.pressure_some)} %"))
+    usage = from_meminfo((N_("Free"), "MemFree"), (N_("Buffers"), "Buffers"), (N_("Shared"), "Shmem"),
+                         (N_("Active"), "Active"), (N_("Inactive"), "Inactive"),
+                         (N_("Waiting to be written"), "Dirty"), (N_("Being written"), "Writeback"),
+                         (N_("Mapped files"), "Mapped"))
 
     kernel = from_meminfo((N_("Kernel caches (slab)"), "Slab"), (N_("Kernel stacks"), "KernelStack"),
                           (N_("Page tables"), "PageTables"), (N_("Promised to programs"), "Committed_AS"),
@@ -400,24 +375,22 @@ def memory_data_sections(
                                             used=meminfo["HugePages_Total"] - meminfo.get("HugePages_Free", 0),
                                             total=meminfo["HugePages_Total"])))
 
-    if overview.swap_total is None:
-        swap = [(tr("Total"), tr("Unknown"))]
-    elif overview.swap_total == 0:
-        swap = [(tr("Total"), tr("Not set up"))]
-    else:
+    swap: list[tuple[str, str]] = []
+    if overview.swap_total:
         swap_used = overview.swap_used or 0
-        swap = [(tr("Total"), format_bytes(overview.swap_total)),
-                (tr("Used"), format_bytes(swap_used)),
-                (tr("Free"), format_bytes(max(0, overview.swap_total - swap_used))),
+        swap = [(tr("Free"), format_bytes(max(0, overview.swap_total - swap_used))),
                 *from_meminfo((N_("Also still in memory"), "SwapCached"))]
         swap += [(device.name, tr("{used} of {total}", used=format_bytes(device.used),
                                   total=format_bytes(device.size)))
                  for device in swaps]
 
-    sections = [(tr("Usage"), usage)]
+    sections = []
+    if usage:
+        sections.append((tr("Usage"), usage))
     if kernel:
         sections.append((tr("Kernel"), kernel))
-    sections.append((tr("Swap"), swap))
+    if swap:
+        sections.append((tr("Swap"), swap))
     if hardware is not None:
         sections.append((tr("Hardware"), _hardware_rows(hardware)))
         sections += [(_module_title(module, number), _module_rows(module))
@@ -486,141 +459,6 @@ def is_tight(overview: MemoryOverview) -> bool:
     return overview.total > 0 and overview.available < overview.total * TIGHT_AVAILABLE_SHARE
 
 
-def _current_username() -> str:
-    try:
-        return psutil.Process().username()
-    except psutil.Error:
-        return ""
-
-
-def _program_name(process: psutil.Process) -> str:
-    """Name a process is listed under. Browsers and Node rename their main thread ("Isolated Web
-    Co", "MainThread"), which is only visible as a difference to the program that was started.
-    """
-    name = process.name()
-    if is_essential(name):
-        return name
-    try:
-        program = os.path.basename(process.exe())
-        if not program or program == name:
-            return name
-        cmdline = process.cmdline()
-    except psutil.Error:
-        return name
-    # Programs started under another name (pipewire-pulse) or with a title of their own (nginx)
-    # do not name their executable here and keep their name.
-    if cmdline and os.path.basename(cmdline[0]) == program:
-        return program
-    return name
-
-
-def _process_key(process: psutil.Process, own_pid: int) -> tuple[str, str]:
-    """(name, username) of a process; this program is listed apart from other Python programs."""
-    username = process.username()
-    if process.pid == own_pid:
-        return OWN_PROGRAM_NAME, username
-    return _program_name(process), username
-
-
-def _measure(process: psutil.Process) -> tuple[int, int | None]:
-    """Memory of a process as (PSS, swap), or (RSS, None) if only that may be read."""
-    try:
-        info = process.memory_full_info()
-        return info.pss, info.swap
-    except psutil.AccessDenied:
-        return process.memory_info().rss, None
-
-
-def scan_programs() -> list[ProgramRow]:
-    """All programs with memory, largest first. PSS keeps shared memory from counting twice."""
-    own_pid = os.getpid()
-    me = _current_username()
-    rows: dict[tuple[str, str], ProgramRow] = {}
-    for process in psutil.process_iter():
-        try:
-            key = _process_key(process, own_pid)
-            memory, swap = _measure(process)
-            # Kernel threads have no memory of their own.
-            if not memory and not swap:
-                continue
-            times = process.cpu_times()
-            created = process.create_time()
-        except psutil.Error:
-            continue
-        row = rows.get(key)
-        if row is None:
-            row = rows[key] = ProgramRow(
-                key=key, name=key[0], username=key[1], memory_bytes=0, swap_bytes=0, exact=True,
-                processes=[], essential=process.pid == own_pid or is_essential(key[0]),
-                own=key[1] == me)
-        row.memory_bytes += memory
-        if swap is None:
-            row.exact = False
-            row.swap_bytes = None
-        elif row.swap_bytes is not None:
-            row.swap_bytes += swap
-        row.processes.append((process.pid, created))
-        row.cpu_seconds += times.user + times.system
-    return sorted(rows.values(), key=lambda row: row.memory_bytes, reverse=True)
-
-
-def sample_cpu_times() -> dict[tuple[str, str], float]:
-    """CPU seconds per program, the cheap scan that keeps idle times right in the background."""
-    own_pid = os.getpid()
-    samples: dict[tuple[str, str], float] = {}
-    for process in psutil.process_iter():
-        try:
-            key = _process_key(process, own_pid)
-            times = process.cpu_times()
-        except psutil.Error:
-            continue
-        samples[key] = samples.get(key, 0.0) + times.user + times.system
-    return samples
-
-
-class ActivityTracker:
-    """Observes since when programs have not used the CPU. Knows nothing before the app started."""
-
-    def __init__(self) -> None:
-        self._state: dict[tuple[str, str], tuple[float, float, float]] = {}
-
-    def update(self, samples: dict[tuple[str, str], float], now: float) -> dict[tuple[str, str], float]:
-        state: dict[tuple[str, str], tuple[float, float, float]] = {}
-        idle: dict[tuple[str, str], float] = {}
-        for key, cpu_seconds in samples.items():
-            previous = self._state.get(key)
-            if previous is None:
-                last_active = now
-            else:
-                old_cpu, old_time, last_active = previous
-                elapsed = now - old_time
-                # The sum shrinks when one of the program's processes ends.
-                used = max(0.0, cpu_seconds - old_cpu)
-                if elapsed > 0 and used >= elapsed * ACTIVE_CPU_SHARE:
-                    last_active = now
-            state[key] = (cpu_seconds, now, last_active)
-            idle[key] = now - last_active
-        self._state = state
-        return idle
-
-
-def build_hints(rows: list[ProgramRow], overview: MemoryOverview) -> list[Hint]:
-    """At most a few suggestions; an idle program is the better candidate than a busy one."""
-    large_from = max(LARGE_MIN_BYTES, overview.total * LARGE_MIN_SHARE)
-    idle_from = max(IDLE_MIN_BYTES, overview.total * IDLE_MIN_SHARE)
-    hints: list[Hint] = []
-    for row in sorted(rows, key=lambda row: row.memory_bytes, reverse=True):
-        if not row.own or row.essential:
-            continue
-        if row.memory_bytes >= idle_from and row.idle_seconds >= IDLE_MIN_SECONDS:
-            hints.append(Hint("idle", row.name, row.memory_bytes, row.idle_seconds))
-        elif row.memory_bytes >= large_from:
-            hints.append(Hint("large", row.name, row.memory_bytes))
-        if len(hints) == MAX_HINTS:
-            break
-    return hints
-
-
 def overview_from_remote(system: dict) -> MemoryOverview:
     total = int(system.get("mem_total_gb", 0) * GIB)
     available = int(system.get("mem_available_gb", 0) * GIB)
@@ -629,37 +467,14 @@ def overview_from_remote(system: dict) -> MemoryOverview:
         cached=int(system.get("mem_cached_gb", 0) * GIB))
 
 
-def rows_from_remote(processes: list[dict]) -> list[ProgramRow]:
-    """Server data only has the RSS of each process, so shared memory counts more than once.
-
-    "own" stays set for hints: nothing can be done from here anyway, as the page locks all
-    actions in remote mode, and a large program on the server is still worth a mention.
-    """
-    rows: dict[tuple[str, str], ProgramRow] = {}
-    for process in processes:
-        memory = int(process.get("memory_mb", 0) * MIB)
-        if memory <= 0:
-            continue
-        key = (process.get("name", ""), process.get("username", ""))
-        row = rows.get(key)
-        if row is None:
-            row = rows[key] = ProgramRow(
-                key=key, name=key[0], username=key[1], memory_bytes=0, swap_bytes=None,
-                exact=False, processes=[], essential=is_essential(key[0]))
-        row.memory_bytes += memory
-        row.processes.append((process.get("pid", 0), 0.0))
-    return sorted(rows.values(), key=lambda row: row.memory_bytes, reverse=True)
-
-
 class MemoryWorker(StoppableWorker):
-    """Runs from the start of the app, otherwise idle times could only start with the first look."""
+    """Reads the sensors while the view is visible, the module data once."""
 
     snapshotReady = Signal(object)
     hardwareReady = Signal(object)
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self._tracker = ActivityTracker()
         self._visible = threading.Event()
         self._refresh = threading.Event()
         self._consumed = threading.Event()
@@ -686,13 +501,12 @@ class MemoryWorker(StoppableWorker):
     def run(self) -> None:
         last_scan = None
         while not self._stop_event.is_set():
-            visible = self._visible.is_set()
-            interval = VISIBLE_INTERVAL if visible else HIDDEN_INTERVAL
             now = time.monotonic()
-            if self._refresh.is_set() or last_scan is None or now - last_scan >= interval:
+            if self._visible.is_set() and (self._refresh.is_set() or last_scan is None
+                                           or now - last_scan >= VISIBLE_INTERVAL):
                 self._refresh.clear()
                 last_scan = now
-                self._scan(visible, now)
+                self._scan()
             if self._hardware_wanted.is_set():
                 self._hardware_wanted.clear()
                 self._load_hardware()
@@ -704,21 +518,14 @@ class MemoryWorker(StoppableWorker):
             self._hardware_loaded = True
             self.hardwareReady.emit(hardware)
 
-    def _scan(self, visible: bool, now: float) -> None:
-        if not visible:
-            self._tracker.update(sample_cpu_times(), now)
-            return
-        rows = scan_programs()
-        idle = self._tracker.update({row.key: row.cpu_seconds for row in rows}, now)
-        for row in rows:
-            row.idle_seconds = idle.get(row.key, 0.0)
+    def _scan(self) -> None:
         # A page that has not drawn the last result yet does not need the next one.
         if self._stop_event.is_set() or not self._consumed.is_set():
             return
         overview = read_overview()
+        sensors = list_ram_sensors()
         self._consumed.clear()
-        self.snapshotReady.emit(MemorySnapshot(overview, rows, build_hints(rows, overview),
-                                               list_ram_sensors()))
+        self.snapshotReady.emit(MemorySnapshot(overview, sensors))
 
 
 def _live_processes(processes: list[tuple[int, float]]) -> list[psutil.Process]:
@@ -732,13 +539,6 @@ def _live_processes(processes: list[tuple[int, float]]) -> list[psutil.Process]:
         except psutil.Error:
             continue
     return live
-
-
-def _is_running(process: psutil.Process) -> bool:
-    try:
-        return process.is_running() and process.status() != psutil.STATUS_ZOMBIE
-    except psutil.Error:
-        return False
 
 
 def _swapped_bytes(processes: list[psutil.Process]) -> int:
@@ -755,61 +555,6 @@ def _swapped_bytes(processes: list[psutil.Process]) -> int:
         except (OSError, ValueError, IndexError):
             continue
     return total
-
-
-@dataclass(frozen=True)
-class EndResult:
-    name: str
-    ended: int = 0
-    denied: int = 0
-    # Still running after the wait; the page asks before ending them by force.
-    survivors: tuple[tuple[int, float], ...] = ()
-
-
-class EndProgramWorker(StoppableWorker):
-    """Asks all processes of a program to end, or with force=True, ends them right away."""
-
-    resultReady = Signal(object)
-
-    def __init__(self, name: str, processes: list[tuple[int, float]], force: bool = False, parent=None):
-        super().__init__(parent)
-        self._name = name
-        self._processes = processes
-        self._force = force
-
-    def run(self) -> None:
-        signalled: list[psutil.Process] = []
-        denied = 0
-        for process in _live_processes(self._processes):
-            try:
-                if self._force:
-                    process.kill()
-                else:
-                    process.terminate()
-                signalled.append(process)
-            except psutil.NoSuchProcess:
-                continue
-            except psutil.AccessDenied:
-                denied += 1
-
-        deadline = time.monotonic() + _END_WAIT_SECONDS
-        waiting = [process for process in signalled if _is_running(process)]
-        while waiting and time.monotonic() < deadline:
-            if self._stop_event.wait(_END_POLL_SECONDS):
-                return
-            waiting = [process for process in waiting if _is_running(process)]
-        if self._stop_event.is_set():
-            return
-
-        survivors = []
-        for process in waiting:
-            try:
-                survivors.append((process.pid, process.create_time()))
-            except psutil.Error:
-                continue
-        self.resultReady.emit(EndResult(
-            self._name, ended=len(signalled) - len(survivors), denied=denied,
-            survivors=tuple(survivors)))
 
 
 def _helper_error(returncode: int) -> str:
@@ -848,7 +593,7 @@ class PageOutWorker(StoppableWorker):
             self.resultReady.emit(result)
 
     def _page_out(self) -> PageOutResult:
-        helper = helper_path()
+        helper = sudo_helper()
         if not helper:
             return PageOutResult(self._name, error=ERROR_NOT_SET_UP)
         live = _live_processes(self._processes)
@@ -903,7 +648,7 @@ class DropCachesWorker(StoppableWorker):
             self.resultReady.emit(result)
 
     def _drop(self) -> DropCachesResult:
-        helper = helper_path()
+        helper = sudo_helper()
         if not helper:
             return DropCachesResult(error=ERROR_NOT_SET_UP)
         before = read_overview().cached
