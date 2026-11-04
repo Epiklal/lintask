@@ -148,7 +148,9 @@ class HistoryPage(QWidget):
         for label, seconds in RANGES:
             self.range_combo.addItem(tr(label), seconds)
         self.range_combo.setCurrentIndex(self.range_combo.findData(DEFAULT_RANGE))
-        self.range_combo.currentIndexChanged.connect(lambda _index: self.reload())
+        # A bound method, not a lambda: a lambda that holds self keeps the page alive in a
+        # reference cycle, and PySide aborts at exit when the collector reaches it.
+        self.range_combo.currentIndexChanged.connect(self._on_range_changed)
         controls.addWidget(self.range_combo)
         self.source_label = QLabel()
         controls.addWidget(self.source_label)
@@ -206,6 +208,9 @@ class HistoryPage(QWidget):
     def hideEvent(self, event) -> None:  # noqa: N802 (Qt override)
         super().hideEvent(event)
         self._timer.stop()
+
+    def _on_range_changed(self, _index: int) -> None:
+        self.reload()
 
     def reload(self) -> None:
         if self._closing or not self.isVisible():
