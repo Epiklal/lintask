@@ -14,6 +14,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QMenu,
     QPushButton,
+    QScrollArea,
     QStackedLayout,
     QStackedWidget,
     QVBoxLayout,
@@ -28,7 +29,7 @@ from app.system_info import (
     disk_io_counters_per_device,
     disk_usage_for_mounts,
     get_cpu_model_name,
-    get_cpu_temperature,
+    get_cpu_temperatures,
     get_primary_network_info,
     get_ram_speed_mhz,
     get_ram_temperature,
@@ -55,7 +56,9 @@ _SIDE_KEYS = {N_("Cores"), N_("Logical processors"), N_("Adapter"), N_("IPv4 add
               N_("Link speed"), N_("Power cycles"), N_("Power-on hours"),
               N_("Driver"), N_("Driver version"), N_("Physical location"), "PCIe",
               N_("Maximum link"), N_("PCIe link"), N_("PCIe status"), N_("PCIe receive"),
-              N_("PCIe send"), N_("Power draw")}
+              N_("PCIe send"), N_("Power draw"), N_("Sockets")}
+# The per-socket rows "CPU 1", "CPU 2", … go to the list on the right as well.
+_CPU_ROW_KEY = N_("CPU {number}")
 # Network graphs never scale below this (KBit/s), so idle noise doesn't fill the graph.
 _NET_SCALE_FLOOR_KBIT = 100.0
 _GPU_MAX_GRAPHS = 10
@@ -111,6 +114,30 @@ def _format_gb(mb: float | None) -> str | None:
 
 def _format_or_na(value: float | None, fmt: str, suffix: str = "") -> str:
     return f"{value:{fmt}}{suffix}" if value is not None else tr("Not available")
+
+
+def _cpu_socket_lines(temps: list, watts: list) -> str:
+    """"CPU 1: 61 °C · 85.3 W" per socket; nothing on a PC with a single CPU."""
+    count = max(len(temps), len(watts))
+    if count < 2:
+        return ""
+    lines = []
+    for index in range(count):
+        temp = temps[index] if index < len(temps) else None
+        power = watts[index] if index < len(watts) else None
+        parts = []
+        if temp is not None:
+            parts.append(f"{temp:.0f} °C")
+        if power is not None:
+            parts.append(f"{power:.1f} W")
+        lines.append(f"{tr(_CPU_ROW_KEY, number=index + 1)}: "
+                     f"{' · '.join(parts) or tr('Not available')}<br>")
+    return "".join(lines)
+
+
+def _core_grid_columns(count: int) -> int:
+    """8 columns like Windows, wider for servers so 128+ threads don't stack into a tower."""
+    return max(1, min(count, max(8, math.ceil(math.sqrt(count * 2)))))
 
 
 class GpuGraphSlot(QWidget):
@@ -210,11 +237,12 @@ class StatsPanel(QWidget):
     def set_text(self, text: str) -> None:
         pairs, notes = self._parse(text)
         side_keys = {tr(key) for key in _SIDE_KEYS}
+        cpu_row = re.compile(re.escape(tr(_CPU_ROW_KEY)).replace(r"\{number\}", r"\d+"))
         big_count = 0
         is_big = []
         for key, value in pairs:
             big = (big_count < _MAX_BIG_STATS and len(value) <= _MAX_BIG_VALUE_LEN
-                   and key not in side_keys)
+                   and key not in side_keys and not cpu_row.fullmatch(key))
             big_count += big
             is_big.append(big)
         signature = (tuple(k for k, _ in pairs), tuple(is_big), len(notes))
@@ -232,6 +260,8 @@ class StatsPanel(QWidget):
             while grid.count():
                 widget = grid.takeAt(0).widget()
                 if widget is not None:
+                    # Hidden right away: deleteLater() leaves it painted until the event loop runs.
+                    widget.hide()
                     widget.deleteLater()
         self._big_values, self._kv_values, self._notes = [], [], []
         big_index = kv_row = 0
@@ -332,10 +362,23 @@ class PerformancePage(QWidget):
         for key in self._tile_order:
             nav_side.addWidget(self.tiles[key])
         nav_side.addStretch(1)
+        nav_list = QWidget()
+        nav_list.setLayout(nav_side)
+        # Scrolls once the tiles no longer fit, e.g. with many disks or GPUs.
+        self._nav_scroll = QScrollArea()
+        self._nav_scroll.setWidgetResizable(True)
+        self._nav_scroll.setFrameShape(QFrame.NoFrame)
+        self._nav_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self._nav_scroll.setWidget(nav_list)
+        # Let the sidebar's own background show through (setWidget turns it on).
+        nav_list.setAutoFillBackground(False)
+        self._nav_scroll.viewport().setAutoFillBackground(False)
         nav_container = QWidget()
         nav_container.setObjectName("perfSidebar")
         nav_container.setAttribute(Qt.WA_StyledBackground, True)
-        nav_container.setLayout(nav_side)
+        nav_layout = QVBoxLayout(nav_container)
+        nav_layout.setContentsMargins(0, 0, 0, 0)
+        nav_layout.addWidget(self._nav_scroll)
         nav_container.setFixedWidth(215)
 
         self.detail_title = QLabel("CPU")
@@ -498,7 +541,7 @@ class PerformancePage(QWidget):
             for i in range(count)
         ]
         self._core_charts = []
-        columns = min(8, count)
+        columns = _core_grid_columns(count)
         for i in range(count):
             chart = LiveChart(max_points=60, line_color=self._color_for("cpu"))
             chart.set_theme(self._dark, self._chart_bg)
@@ -808,14 +851,21 @@ class PerformancePage(QWidget):
         self._update_gpu_slots()
 
         cpu_freq_ghz = (snap["cpu_freq_mhz"] or 0) / 1000
-        cpu_temp = get_cpu_temperature()
+        cpu_temps = get_cpu_temperatures()
+        cpu_temp = max(cpu_temps, default=None)
         cpu_power = self._cpu_power_monitor.poll_watts()
+        cpu_watts = self._cpu_power_monitor.cpu_watts
         cpu_power_reason = self._cpu_power_monitor.unavailable_reason()
         if self._remote_snapshot is not None:
             # Temperature and power belong to the monitored server, not this PC.
             cpu_temp = self._remote_snapshot.get("cpu_temp_c")
             cpu_power = self._remote_snapshot.get("cpu_power_w")
             cpu_power_reason = self._remote_snapshot.get("cpu_power_reason") or N_("Not available")
+            # Older servers don't send the per-socket lists.
+            cpu_temps = self._remote_snapshot.get("cpu_temps_c") or []
+            cpu_watts = self._remote_snapshot.get("cpu_powers_w") or []
+        # With several CPUs the big value is the hottest one; each is listed on the right.
+        temp_label = tr("Highest temperature") if len(cpu_temps) > 1 else tr("Temperature")
         cpu_model = tr(
             (self._remote_snapshot or {}).get("cpu_model") or self._cpu_model
         )
@@ -827,9 +877,11 @@ class PerformancePage(QWidget):
                 f"{tr('Speed')}: {cpu_freq_ghz:.2f} GHz<br>"
                 f"{tr('Cores')}: {snap['cpu_cores_physical']}<br>"
                 f"{tr('Logical processors')}: {snap['cpu_cores_logical']}<br>"
-                f"{tr('Temperature')}: {_format_or_na(cpu_temp, '.0f', '°C')}<br>"
+                f"{temp_label}: {_format_or_na(cpu_temp, '.0f', '°C')}<br>"
                 f"{tr('Power draw')}: "
                 f"{_format_or_na(cpu_power, '.1f', ' W') if cpu_power is not None else tr(cpu_power_reason)}<br>"
+                f"{tr('Sockets')}: {snap.get('cpu_sockets', 1)}<br>"
+                f"{_cpu_socket_lines(cpu_temps, cpu_watts)}"
                 f"{tr('Processes')}: {snap['process_count']}<br>"
                 f"{tr('Uptime')}: {_format_uptime(snap['uptime_seconds'])}",
             ),

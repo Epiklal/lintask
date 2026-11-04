@@ -14,7 +14,7 @@ from PySide6.QtWidgets import QApplication  # noqa: E402
 from app import system_info  # noqa: E402
 from app.system_info import (  # noqa: E402
     GpuMonitor, GpuSystemMonitor, GpuSystemWorker, _drm_vram_total, _parse_drm_fdinfo,
-    _sum_device_memory_regions, list_gpus,
+    _sum_device_memory_regions, list_gpus, poll_gpus,
 )
 
 
@@ -407,6 +407,76 @@ class TestIntelArc(unittest.TestCase):
         self.assertEqual(gpus[1]["card_path"], arc)
 
 
+def nvidia_query_row(index):
+    return (f"{index}, RTX {index}, {index}, 1024, 24576, 50, 100.5, "
+            "4, 16, 4, 16, 0, 0")
+
+
+class FakeDmon:
+    def __init__(self, command, **_kwargs):
+        self.indices = [int(index) for index in command[command.index("-i") + 1].split(",")]
+        self.returncode = 0
+
+    def communicate(self, timeout=None):
+        rows = "".join(f"    {index}    {index}     1     2     3\n" for index in self.indices)
+        return "# gpu     sm    mem    enc    dec\n# Idx      %      %      %      %\n" + rows, ""
+
+
+class TestManyGpus(unittest.TestCase):
+    """Ten, twenty or more cards: no fixed limit, and one round stays a single nvidia-smi
+    query, one dmon per 16 GPUs and one /proc scan, however many GPUs there are."""
+
+    def test_ten_nvidia_and_ten_amd_are_all_listed(self):
+        with tempfile.TemporaryDirectory() as drm:
+            for i in range(10):
+                make_card(drm, f"card{i}", "amdgpu", f"0000:{0x40 + i:02x}:00.0", vram=True)
+            smi = "".join(f"{i}, 00000000:{0x10 + i:02X}:00.0, 550.54\n" for i in range(10))
+            patch_smi, patch_output = nvidia_smi(smi)
+            with patch_smi, patch_output:
+                gpus = list_gpus(drm)
+        self.assertEqual(len(gpus), 20)
+        self.assertEqual([gpu["index"] for gpu in gpus[:10]], list(range(10)))
+        self.assertEqual({gpu["backend"] for gpu in gpus[10:]}, {"sysfs"})
+        self.assertEqual(len({gpu["pci_slot"] for gpu in gpus}), 20)
+
+    def test_twenty_nvidia_gpus_share_one_query_and_two_dmon_calls(self):
+        with mock.patch.object(system_info, "_NVIDIA_SMI", "/usr/bin/nvidia-smi"):
+            monitors = [GpuSystemMonitor({"backend": "nvidia", "index": i,
+                                          "pci_slot": f"0000:{0x10 + i:02x}:00.0",
+                                          "driver_version": "550.54"}) for i in range(20)]
+            query = "".join(nvidia_query_row(i) + "\n" for i in range(20))
+            with mock.patch.object(system_info.subprocess, "check_output",
+                                   return_value=query) as check_output, \
+                    mock.patch.object(system_info.subprocess, "Popen",
+                                      side_effect=FakeDmon) as popen:
+                snapshots = poll_gpus(monitors)
+
+        check_output.assert_called_once()
+        chunks = [call.args[0][call.args[0].index("-i") + 1] for call in popen.call_args_list]
+        self.assertEqual(chunks, [",".join(map(str, range(16))),
+                                  ",".join(map(str, range(16, 20)))])
+        self.assertEqual([snapshot["name"] for snapshot in snapshots],
+                         [f"RTX {i}" for i in range(20)])
+        self.assertEqual(snapshots[19]["percent"], 19.0)
+        self.assertEqual(snapshots[19]["engines"]["3D"], 19.0)
+        self.assertEqual(snapshots[0]["driver_version"], "550.54")
+
+    def test_proc_is_scanned_once_for_all_cards(self):
+        with tempfile.TemporaryDirectory() as drm:
+            monitors = []
+            for i in range(12):
+                device = make_card(drm, f"card{i}", "amdgpu", f"0000:{0x40 + i:02x}:00.0",
+                                   vram=True)
+                monitors.append(GpuSystemMonitor({"backend": "sysfs", "card_path": device,
+                                                  "pci_slot": f"0000:{0x40 + i:02x}:00.0"}))
+            with mock.patch.object(system_info, "_scan_drm_clients",
+                                   return_value=[]) as scan:
+                snapshots = poll_gpus(monitors)
+        scan.assert_called_once()
+        self.assertEqual(len(snapshots), 12)
+        self.assertTrue(all(snapshot is not None for snapshot in snapshots))
+
+
 class FakeMonitor:
     def __init__(self, gpu):
         self.gpu = gpu
@@ -473,6 +543,16 @@ class TestPerformancePageGpus(unittest.TestCase):
         self.assertEqual([page._subtitles[key] for key in page._gpu_keys()], names)
         self.assertEqual([page._gpu_histories[i]["Utilization"][-1] for i in range(4)],
                          [0.0, 10.0, 20.0, 30.0])
+
+    def test_twenty_gpus_fit_into_the_scrolling_sidebar(self):
+        page = self.make_page(20)
+        self.assertEqual(len(page._gpu_keys()), 20)
+        page._on_gpu_snapshot_ready([{"name": f"GPU{i}", "percent": float(i)}
+                                     for i in range(20)])
+        page._tick()
+        self.assertEqual(page._gpu_histories[19]["Utilization"][-1], 19.0)
+        sidebar = page._nav_scroll.widget()
+        self.assertTrue(all(sidebar.isAncestorOf(page.tiles[key]) for key in page._gpu_keys()))
 
     def test_vram_usage_without_size_is_still_shown(self):
         page = self.make_page(1)

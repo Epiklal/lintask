@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import ctypes
 import fcntl
+import functools
 import glob
 import json
 import os
@@ -449,6 +450,10 @@ class _EnergyCounter:
         return delta / 1_000_000 / (now - prev[0])
 
 
+def _natural_key(text: str) -> list:
+    return [int(part) if part.isdigit() else part for part in re.split(r"(\d+)", text)]
+
+
 def _rapl_counters(kind: str, base: str = _POWERCAP_BASE) -> list[_EnergyCounter]:
     """One counter per socket for the RAPL zones named `kind` ("package", "uncore", …).
 
@@ -459,7 +464,8 @@ def _rapl_counters(kind: str, base: str = _POWERCAP_BASE) -> list[_EnergyCounter
     """
     zones: dict[tuple[str | None, str], str] = {}
     for interface in _RAPL_INTERFACES:
-        for zone_dir in sorted(glob.glob(f"{base}/{interface}:*")):
+        # Natural order, so socket 10 comes after socket 2 and counters line up with CPU 1, 2, …
+        for zone_dir in sorted(glob.glob(f"{base}/{interface}:*"), key=_natural_key):
             name = _read_sysfs_str(f"{zone_dir}/name") or ""
             if not (name == kind or name.startswith(f"{kind}-")):
                 continue
@@ -491,22 +497,25 @@ def _normalize_pci_slot(bus_id: str) -> str:
     return bus_id.strip()[-12:].lower()
 
 
-def _nvidia_gpu_slots() -> list[tuple[int, str]]:
-    """(nvidia-smi index, PCI slot) for every GPU the NVIDIA driver drives."""
+def _nvidia_gpu_slots() -> list[tuple[int, str, str | None]]:
+    """(nvidia-smi index, PCI slot, driver version) for every GPU the NVIDIA driver drives,
+    all from one call however many cards there are."""
     if not _NVIDIA_SMI:
         return []
     try:
         out = subprocess.check_output(
-            [_NVIDIA_SMI, "--query-gpu=index,pci.bus_id", "--format=csv,noheader"],
-            text=True, timeout=2, stderr=subprocess.DEVNULL,
+            [_NVIDIA_SMI, "--query-gpu=index,pci.bus_id,driver_version",
+             "--format=csv,noheader"],
+            text=True, timeout=5, stderr=subprocess.DEVNULL,
         )
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError):
         return []
     gpus = []
     for line in out.splitlines():
         parts = [part.strip() for part in line.split(",")]
-        if len(parts) == 2 and parts[0].isdigit():
-            gpus.append((int(parts[0]), _normalize_pci_slot(parts[1])))
+        if len(parts) >= 2 and parts[0].isdigit():
+            version = parts[2] if len(parts) > 2 and parts[2] else None
+            gpus.append((int(parts[0]), _normalize_pci_slot(parts[1]), version))
     return gpus
 
 
@@ -517,7 +526,7 @@ def list_gpus(drm_base: str = "/sys/class/drm") -> list[dict]:
     (amdgpu, i915, xe, nouveau, ...) through sysfs. The first entry is the GPU that
     used to be the only one shown: a dedicated card before the integrated one."""
     nvidia = _nvidia_gpu_slots()
-    nvidia_by_slot = {slot: index for index, slot in nvidia}
+    nvidia_by_slot = {slot: index for index, slot, _version in nvidia}
     cards = []
     try:
         names = sorted(os.listdir(drm_base), key=lambda name: (len(name), name))
@@ -554,9 +563,116 @@ def list_gpus(drm_base: str = "/sys/class/drm") -> list[dict]:
     for card in cards:
         # fdinfo of old kernels names no device: only usable when there is one card.
         card["only_drm_card"] = len(cards) == 1
-    nvidia_gpus = [{"backend": "nvidia", "index": index, "card_path": None, "pci_slot": slot}
-                   for index, slot in sorted(nvidia)]
+    nvidia_gpus = [{"backend": "nvidia", "index": index, "card_path": None, "pci_slot": slot,
+                    "driver_version": version}
+                   for index, slot, version in sorted(nvidia, key=lambda gpu: gpu[0])]
     return nvidia_gpus + cards
+
+
+# Fields of the per-round nvidia-smi query; older drivers lack the PCIe ones.
+_NVIDIA_FIELDS = ("name,utilization.gpu,memory.used,memory.total,temperature.gpu,power.draw,"
+                  "pcie.link.gen.current,pcie.link.width.current,pcie.link.gen.max,"
+                  "pcie.link.width.max,pcie.tx_util,pcie.rx_util")
+_NVIDIA_LEGACY_FIELDS = "name,utilization.gpu,memory.used,memory.total,temperature.gpu,power.draw"
+# nvidia-smi dmon watches at most 16 GPUs per call.
+_NVIDIA_DMON_MAX_GPUS = 16
+
+
+def _parse_nvidia_row(fields: list[str]) -> dict:
+    """One GPU's row of _NVIDIA_FIELDS or _NVIDIA_LEGACY_FIELDS (without engines)."""
+    if len(fields) not in (6, 12):
+        raise ValueError(f"unexpected nvidia-smi row: {fields}")
+    name, util, mem_used, mem_total, temp, power = fields[:6]
+    result = {
+        "name": name,
+        "percent": _nvidia_float(util) or 0.0,
+        "vram_used_mb": _nvidia_float(mem_used),
+        "vram_total_mb": _nvidia_float(mem_total),
+        "temp_c": _nvidia_float(temp),
+        "power_w": _nvidia_float(power),
+    }
+    if len(fields) == 12:
+        pcie_gen, pcie_width, max_gen, max_width, tx_util, rx_util = fields[6:]
+        result["pcie"] = _pcie_link_info(pcie_gen, pcie_width, max_gen, max_width) | {
+            "tx_mb_s": _nvidia_rate_mb_s(tx_util),
+            "rx_mb_s": _nvidia_rate_mb_s(rx_util),
+        }
+    else:
+        # Keep older NVIDIA drivers usable when PCIe query fields are absent.
+        result |= {"pcie": {}, "gtt_used_mb": None, "gtt_total_mb": None}
+    return result
+
+
+def _parse_nvidia_dmon(out: str) -> dict[int, dict[str, float]]:
+    """Engine load per nvidia-smi index from `dmon -s u` output."""
+    engines = {}
+    for line in out.splitlines():
+        if not line or line.startswith("#"):
+            continue
+        parts = line.split()
+        if len(parts) < 5 or not parts[0].isdigit():
+            continue
+        try:
+            sm, mem, enc, dec = (float(part) for part in parts[1:5])
+        except ValueError:  # "-" for a GPU that cannot report it
+            continue
+        engines[int(parts[0])] = {"3D": sm, "Memory Controller": mem,
+                                  "Video Encode": enc, "Video Decode": dec}
+    return engines
+
+
+def _nvidia_query_all() -> dict[int, dict] | None:
+    """_parse_nvidia_row for every NVIDIA GPU from one nvidia-smi call, None if it fails."""
+    if not _NVIDIA_SMI:
+        return None
+    for fields in (_NVIDIA_FIELDS, _NVIDIA_LEGACY_FIELDS):
+        try:
+            out = subprocess.check_output(
+                [_NVIDIA_SMI, f"--query-gpu=index,{fields}", "--format=csv,noheader,nounits"],
+                text=True, timeout=5, stderr=subprocess.DEVNULL,
+            )
+            rows = {}
+            for line in out.splitlines():
+                parts = [part.strip() for part in line.split(",")]
+                if parts and parts[0].isdigit():
+                    rows[int(parts[0])] = _parse_nvidia_row(parts[1:])
+            if rows:
+                return rows
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError, ValueError):
+            continue
+    return None
+
+
+def _nvidia_engines_all(indices: list[int]) -> dict[int, dict[str, float]] | None:
+    """Engine load of the given NVIDIA GPUs; one dmon call per 16 GPUs, which run
+    side by side since each one samples for about a second."""
+    if not _NVIDIA_SMI or not indices:
+        return None
+    chunks = [indices[start:start + _NVIDIA_DMON_MAX_GPUS]
+              for start in range(0, len(indices), _NVIDIA_DMON_MAX_GPUS)]
+    processes = []
+    for chunk in chunks:
+        try:
+            processes.append(subprocess.Popen(
+                [_NVIDIA_SMI, "dmon", "-c", "1", "-s", "u",
+                 "-i", ",".join(str(index) for index in chunk)],
+                text=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            ))
+        except OSError:
+            continue
+    engines = {}
+    answered = False
+    for process in processes:
+        try:
+            out, _ = process.communicate(timeout=5)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.communicate()
+            continue
+        if process.returncode == 0:
+            answered = True
+            engines |= _parse_nvidia_dmon(out)
+    return engines if answered else None
 
 
 # Memory-region queries of i915 and xe (include/uapi/drm/i915_drm.h, xe_drm.h). The
@@ -652,6 +768,94 @@ def _numbered_sensors(hwmon_dir: str, kind: str) -> list[str]:
     return sorted(paths, key=lambda path: int(re.search(r"(\d+)_input$", path).group(1)))
 
 
+def _scan_drm_clients() -> list[tuple[str | None, dict]]:
+    """(drm-pdev or None, _parse_drm_fdinfo counters) of every DRM client of every process,
+    deduped by client: a client opened through several fds is listed once."""
+    clients = []
+    try:
+        pid_list = os.listdir("/proc")
+    except OSError:
+        return clients
+    for pid_str in pid_list:
+        if not pid_str.isdigit():
+            continue
+        fdinfo_dir = f"/proc/{pid_str}/fdinfo"
+        try:
+            fd_names = os.listdir(fdinfo_dir)
+        except OSError:
+            continue
+        seen_clients: set[str] = set()
+        for fd in fd_names:
+            try:
+                with open(f"{fdinfo_dir}/{fd}") as f:
+                    content = f.read()
+            except OSError:
+                continue
+            if "drm-driver:" not in content:
+                continue
+            pdev_match = _DRM_PDEV_RE.search(content)
+            pdev = pdev_match.group(1).lower() if pdev_match else None
+            client_match = _DRM_CLIENT_ID_RE.search(content)
+            client_id = f"{pdev}:{client_match.group(1) if client_match else fd}"
+            if client_id in seen_clients:
+                continue
+            seen_clients.add(client_id)
+            clients.append((pdev, _parse_drm_fdinfo(content)))
+    return clients
+
+
+def _sum_drm_usage(clients: list[tuple[str | None, dict]], pci_slot: str | None = None,
+                   only_drm_card: bool = True) -> dict:
+    """Sum the fdinfo counters of one GPU's clients out of _scan_drm_clients().
+
+    Clients of other GPUs are told apart by drm-pdev; those without it (old
+    kernels) only count when this is the sole DRM card."""
+    total = {"ns": {}, "cycles": {}, "total_cycles": {}, "capacity": {}, "vram_kib": None}
+    for pdev, usage in clients:
+        if pdev is not None:
+            if pci_slot is not None and pdev != pci_slot:
+                continue
+        elif not only_drm_card:
+            continue
+        for key in ("ns", "cycles"):
+            for engine, value in usage[key].items():
+                total[key][engine] = total[key].get(engine, 0) + value
+        # GPU clock and engine count are the same for every client: not summed.
+        for key in ("total_cycles", "capacity"):
+            for engine, value in usage[key].items():
+                total[key][engine] = max(total[key].get(engine, 0), value)
+        if usage["vram_kib"] is not None:
+            total["vram_kib"] = (total["vram_kib"] or 0) + usage["vram_kib"]
+    return total
+
+
+def poll_gpus(monitors: list) -> list:
+    """poll() of every monitor, with nvidia-smi and the /proc scan run once for all GPUs
+    instead of once per GPU: with 20 cards a round takes about a second, not 20."""
+    nvidia_indices = [monitor._nvidia_index for monitor in monitors
+                      if getattr(monitor, "_nvidia", None)
+                      and getattr(monitor, "_nvidia_index", None) is not None]
+    sysfs_count = sum(1 for monitor in monitors if getattr(monitor, "_card_path", None))
+    shared: dict = {}
+    if len(nvidia_indices) > 1:
+        shared["nvidia_stats"] = _nvidia_query_all()
+        if shared["nvidia_stats"] is not None:
+            shared["nvidia_engines"] = _nvidia_engines_all(nvidia_indices) or {}
+    if sysfs_count > 1:
+        shared["drm_clients"] = _scan_drm_clients()
+    snapshots = []
+    for monitor in monitors:
+        if getattr(monitor, "_nvidia", None):
+            kwargs = {key: shared[key] for key in ("nvidia_stats", "nvidia_engines")
+                      if key in shared}
+        elif getattr(monitor, "_card_path", None):
+            kwargs = {key: shared[key] for key in ("drm_clients",) if key in shared}
+        else:
+            kwargs = {}
+        snapshots.append(monitor.poll(**kwargs))
+    return snapshots
+
+
 class GpuSystemMonitor:
     """Best-effort overall (not per-process) GPU stats for one GPU: utilization/VRAM/temp/power.
 
@@ -669,6 +873,7 @@ class GpuSystemMonitor:
         self._nvidia_index = gpu.get("index")
         self._card_path = gpu.get("card_path") if gpu.get("backend") == "sysfs" else None
         self._pci_slot = gpu.get("pci_slot")
+        self._driver_version = gpu.get("driver_version")
         self._only_drm_card = gpu.get("only_drm_card", True)
         self._power_counter = self._find_power_counter() if self._card_path else None
         self._prev_engine_usage: dict | None = None
@@ -699,13 +904,25 @@ class GpuSystemMonitor:
         uncore = _rapl_counters("uncore") if is_intel_igpu else []
         return uncore[0] if len(uncore) == 1 else None
 
-    def poll(self) -> dict | None:
+    def poll(self, nvidia_stats: dict | None = None, nvidia_engines: dict | None = None,
+             drm_clients: list | None = None) -> dict | None:
+        """Current stats; poll_gpus() hands in what it already read for all GPUs at once
+        (_nvidia_query_all, _nvidia_engines_all, _scan_drm_clients)."""
         if self._nvidia:
-            result = self._poll_nvidia()
+            stats = (nvidia_stats or {}).get(self._nvidia_index)
+            if stats is not None:
+                result = dict(stats)
+                result["engines"] = (nvidia_engines.get(self._nvidia_index, {})
+                                     if nvidia_engines is not None
+                                     else self._poll_nvidia_engines())
+            else:
+                result = self._poll_nvidia()
         elif self._card_path:
             result = self._poll_sysfs()
             if result is not None:
-                usage = self._collect_drm_usage(self._pci_slot, self._only_drm_card)
+                usage = (self._collect_drm_usage(self._pci_slot, self._only_drm_card)
+                         if drm_clients is None
+                         else _sum_drm_usage(drm_clients, self._pci_slot, self._only_drm_card))
                 result["engines"] = self._poll_sysfs_engines(usage)
                 if result["vram_used_mb"] is None and usage["vram_kib"] is not None:
                     # Intel Arc has no mem_info_vram_used: add up what its clients hold.
@@ -718,6 +935,10 @@ class GpuSystemMonitor:
         return (result | self._static_info) if result is not None else None
 
     def _nvidia_static_info(self) -> dict:
+        if self._driver_version and self._pci_slot:
+            # list_gpus() already read both: no nvidia-smi call per GPU at start.
+            return {"driver": "nvidia", "driver_version": self._driver_version,
+                    "pci_location": _pci_location_text(self._pci_slot)}
         try:
             out = subprocess.check_output(
                 self._nvidia_command("--query-gpu=driver_version,pci.bus_id",
@@ -752,64 +973,20 @@ class GpuSystemMonitor:
         return info
 
     def _poll_nvidia(self) -> dict | None:
-        try:
-            out = subprocess.check_output(
-                self._nvidia_command(
-                    "--query-gpu=name,utilization.gpu,memory.used,memory.total,"
-                    "temperature.gpu,power.draw,pcie.link.gen.current,"
-                    "pcie.link.width.current,pcie.link.gen.max,pcie.link.width.max,"
-                    "pcie.tx_util,pcie.rx_util",
-                    "--format=csv,noheader,nounits"),
-                text=True, timeout=2, stderr=subprocess.DEVNULL,
-            )
-            fields = [part.strip() for part in out.splitlines()[0].split(",")]
-            name, util, mem_used, mem_total, temp, power = fields[:6]
-            pcie_gen, pcie_width, max_gen, max_width, tx_util, rx_util = fields[6:]
-            result = {
-                "name": name,
-                "percent": _nvidia_float(util) or 0.0,
-                "vram_used_mb": _nvidia_float(mem_used),
-                "vram_total_mb": _nvidia_float(mem_total),
-                "temp_c": _nvidia_float(temp),
-                "power_w": _nvidia_float(power),
-                "pcie": _pcie_link_info(pcie_gen, pcie_width, max_gen, max_width) | {
-                    "tx_mb_s": _nvidia_rate_mb_s(tx_util),
-                    "rx_mb_s": _nvidia_rate_mb_s(rx_util),
-                },
-            }
-        except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError,
-                IndexError, ValueError):
-            return self._poll_nvidia_legacy()
-        result["engines"] = self._poll_nvidia_engines()
-        return result
-
-    def _poll_nvidia_legacy(self) -> dict | None:
-        """Keep older NVIDIA drivers usable when PCIe query fields are absent."""
-        try:
-            out = subprocess.check_output(
-                self._nvidia_command(
-                    "--query-gpu=name,utilization.gpu,memory.used,memory.total,"
-                    "temperature.gpu,power.draw",
-                    "--format=csv,noheader,nounits"),
-                text=True, timeout=2, stderr=subprocess.DEVNULL,
-            )
-            name, util, mem_used, mem_total, temp, power = (
-                p.strip() for p in out.splitlines()[0].split(",")
-            )
-            result = {
-                "name": name,
-                "percent": _nvidia_float(util) or 0.0,
-                "vram_used_mb": _nvidia_float(mem_used),
-                "vram_total_mb": _nvidia_float(mem_total),
-                "temp_c": _nvidia_float(temp),
-                "power_w": _nvidia_float(power),
-                "pcie": {},
-            }
-        except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError,
-                IndexError, ValueError):
-            return None
-        result["engines"] = self._poll_nvidia_engines()
-        return result | {"gtt_used_mb": None, "gtt_total_mb": None}
+        # Older drivers lack the PCIe fields: they get the legacy query.
+        for fields in (_NVIDIA_FIELDS, _NVIDIA_LEGACY_FIELDS):
+            try:
+                out = subprocess.check_output(
+                    self._nvidia_command(f"--query-gpu={fields}", "--format=csv,noheader,nounits"),
+                    text=True, timeout=2, stderr=subprocess.DEVNULL,
+                )
+                result = _parse_nvidia_row([part.strip() for part in out.splitlines()[0].split(",")])
+            except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError,
+                    IndexError, ValueError):
+                continue
+            result["engines"] = self._poll_nvidia_engines()
+            return result
+        return None
 
     def _poll_nvidia_engines(self) -> dict[str, float]:
         try:
@@ -817,20 +994,9 @@ class GpuSystemMonitor:
                 self._nvidia_command("dmon", "-c", "1", "-s", "u"),
                 text=True, timeout=2, stderr=subprocess.DEVNULL,
             )
-            for line in out.splitlines():
-                if not line or line.startswith("#"):
-                    continue
-                parts = line.split()
-                if len(parts) < 5:
-                    continue
-                _gpu, sm, mem, enc, dec = parts[:5]
-                return {
-                    "3D": float(sm), "Memory Controller": float(mem),
-                    "Video Encode": float(enc), "Video Decode": float(dec),
-                }
-        except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError, ValueError):
-            pass
-        return {}
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError):
+            return {}
+        return next(iter(_parse_nvidia_dmon(out).values()), {})
 
     def _poll_sysfs_engines(self, usage: dict) -> dict[str, float]:
         now = time.monotonic()
@@ -863,54 +1029,8 @@ class GpuSystemMonitor:
     @staticmethod
     def _collect_drm_usage(pci_slot: str | None = None, only_drm_card: bool = True) -> dict:
         """Sum the fdinfo counters (see _parse_drm_fdinfo) of one GPU across all
-        processes, deduped by DRM client.
-
-        Clients of other GPUs are told apart by drm-pdev; those without it (old
-        kernels) only count when this is the sole DRM card."""
-        total = {"ns": {}, "cycles": {}, "total_cycles": {}, "capacity": {}, "vram_kib": None}
-        try:
-            pid_list = os.listdir("/proc")
-        except OSError:
-            return total
-        for pid_str in pid_list:
-            if not pid_str.isdigit():
-                continue
-            fdinfo_dir = f"/proc/{pid_str}/fdinfo"
-            try:
-                fd_names = os.listdir(fdinfo_dir)
-            except OSError:
-                continue
-            seen_clients: set[str] = set()
-            for fd in fd_names:
-                try:
-                    with open(f"{fdinfo_dir}/{fd}") as f:
-                        content = f.read()
-                except OSError:
-                    continue
-                if "drm-driver:" not in content:
-                    continue
-                pdev_match = _DRM_PDEV_RE.search(content)
-                if pdev_match:
-                    if pci_slot is not None and pdev_match.group(1).lower() != pci_slot:
-                        continue
-                elif not only_drm_card:
-                    continue
-                client_match = _DRM_CLIENT_ID_RE.search(content)
-                client_id = f"{pid_str}:{client_match.group(1) if client_match else fd}"
-                if client_id in seen_clients:
-                    continue
-                seen_clients.add(client_id)
-                usage = _parse_drm_fdinfo(content)
-                for key in ("ns", "cycles"):
-                    for engine, value in usage[key].items():
-                        total[key][engine] = total[key].get(engine, 0) + value
-                # GPU clock and engine count are the same for every client: not summed.
-                for key in ("total_cycles", "capacity"):
-                    for engine, value in usage[key].items():
-                        total[key][engine] = max(total[key].get(engine, 0), value)
-                if usage["vram_kib"] is not None:
-                    total["vram_kib"] = (total["vram_kib"] or 0) + usage["vram_kib"]
-        return total
+        processes, deduped by DRM client."""
+        return _sum_drm_usage(_scan_drm_clients(), pci_slot, only_drm_card)
 
     def _query_vram_total(self) -> int | None:
         """VRAM size from the i915/xe driver itself; asked only once since it never changes
@@ -1081,11 +1201,9 @@ class GpuSystemWorker(StoppableWorker):
     def run(self) -> None:
         while not self._stop_event.is_set():
             # One entry per GPU (None while a GPU cannot be read), in list_gpus() order.
-            snapshots = []
-            for monitor in self._monitors:
-                snapshots.append(monitor.poll())
-                if self._stop_event.is_set():
-                    return
+            snapshots = poll_gpus(self._monitors)
+            if self._stop_event.is_set():
+                return
             self.snapshotReady.emit(snapshots)
             self._stop_event.wait(self._interval)
 
@@ -1102,6 +1220,7 @@ class CpuPowerMonitor:
     def __init__(self):
         self._counters = _rapl_counters("package")
         self._hwmon_power_paths = [] if self._counters else self._find_hwmon_power_paths()
+        self.cpu_watts: list[float | None] = []
 
     def available(self) -> bool:
         return bool(self._counters or self._hwmon_power_paths)
@@ -1116,7 +1235,7 @@ class CpuPowerMonitor:
     @staticmethod
     def _find_hwmon_power_paths() -> list[str]:
         paths = []
-        for hwmon_dir in glob.glob("/sys/class/hwmon/hwmon*"):
+        for hwmon_dir in sorted(glob.glob("/sys/class/hwmon/hwmon*"), key=_natural_key):
             name = _read_sysfs_str(f"{hwmon_dir}/name")
             if name not in ("zenpower", "zenpower3"):
                 continue
@@ -1128,21 +1247,23 @@ class CpuPowerMonitor:
         return paths
 
     def poll_watts(self) -> float | None:
+        """Sum over all sockets; the per-socket values land in cpu_watts."""
         # Poll every counter, so each one keeps its previous sample up to date.
         readings = [counter.poll_watts() for counter in self._counters]
+        if not self._counters:
+            readings = [self._read_hwmon_watts(path) for path in self._hwmon_power_paths]
+        # One entry per socket (CPU 1, CPU 2, …), None while one cannot be read.
+        self.cpu_watts = readings
         watts = [value for value in readings if value is not None]
-        if watts:
-            return sum(watts)
-        total_watts = 0.0
-        got_any = False
-        for path in self._hwmon_power_paths:
-            try:
-                with open(path) as f:
-                    total_watts += int(f.read().strip()) / 1_000_000
-                got_any = True
-            except (OSError, ValueError):
-                continue
-        return total_watts if got_any else None
+        return sum(watts) if watts else None
+
+    @staticmethod
+    def _read_hwmon_watts(path: str) -> float | None:
+        try:
+            with open(path) as f:
+                return int(f.read().strip()) / 1_000_000
+        except (OSError, ValueError):
+            return None
 
 
 def get_cpu_model_name() -> str:
@@ -1156,23 +1277,53 @@ def get_cpu_model_name() -> str:
     return N_("Unknown CPU")
 
 
-def get_cpu_temperature() -> float | None:
+def get_cpu_temperatures() -> list[float]:
+    """One temperature per CPU socket (CPU 1, CPU 2, …); a single value on ordinary PCs.
+
+    psutil merges chips of the same name: two Intel sockets show up as one "coretemp"
+    list with "Package id 0" and "Package id 1", two AMD sockets as one "k10temp" list
+    with a "Tctl" from each chip.
+    """
     try:
         temps = psutil.sensors_temperatures()
     except (AttributeError, OSError):
-        return None
+        return []
     for key in ("k10temp", "coretemp", "zenpower", "cpu_thermal", "acpitz"):
         entries = temps.get(key)
         if not entries:
             continue
-        for entry in entries:
-            if entry.label in ("Tctl", "Package id 0", "Tdie"):
-                return entry.current
-        return entries[0].current
+        packages = sorted(
+            (int(match.group(1)), entry.current) for entry in entries
+            if (match := re.fullmatch(r"Package id (\d+)", entry.label or ""))
+        )
+        if packages:
+            return [current for _package, current in packages]
+        # Zen 1 chips report both: Tdie is the real one, Tctl carries a fan offset.
+        for label in ("Tdie", "Tctl"):
+            per_chip = [entry.current for entry in entries if entry.label == label]
+            if per_chip:
+                return per_chip
+        return [entries[0].current]
     for entries in temps.values():
         if entries:
-            return entries[0].current
-    return None
+            return [entries[0].current]
+    return []
+
+
+def get_cpu_temperature() -> float | None:
+    """The hottest CPU socket, as that is the one that throttles first."""
+    return max(get_cpu_temperatures(), default=None)
+
+
+@functools.lru_cache(maxsize=1)
+def get_cpu_socket_count(cpu_base: str = "/sys/devices/system/cpu") -> int:
+    """Number of physical CPUs (sockets); 1 when the kernel doesn't say."""
+    packages = {
+        _read_sysfs_str(path)
+        for path in glob.glob(f"{cpu_base}/cpu[0-9]*/topology/physical_package_id")
+    }
+    packages.discard(None)
+    return max(len(packages), 1)
 
 
 def read_dmi_memory() -> str | None:
@@ -1743,6 +1894,7 @@ def system_snapshot() -> dict:
         "cpu_freq_max_mhz": freq.max if freq else None,
         "cpu_cores_physical": psutil.cpu_count(logical=False) or 0,
         "cpu_cores_logical": psutil.cpu_count(logical=True) or 0,
+        "cpu_sockets": get_cpu_socket_count(),
         "process_count": len(psutil.pids()),
         "uptime_seconds": time.time() - psutil.boot_time(),
         "mem_percent": vm.percent,

@@ -226,12 +226,13 @@ def run_server(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT,
         GpuSystemMonitor,
         ProcessWorker,
         get_cpu_model_name,
-        get_cpu_temperature,
+        get_cpu_temperatures,
         list_physical_disks,
         list_autostart_entries,
         list_gpus,
         list_hardware_sensors,
         list_ram_sensors,
+        poll_gpus,
         system_snapshot,
     )
     from pages.services_page import ServiceListWorker
@@ -253,14 +254,17 @@ def run_server(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT,
         for row in processes:
             del row["swap_mb"]
         docker_rows, docker_error = docker_worker._collect_rows()
-        gpus = [monitor.poll() for monitor in gpu_monitors]
+        gpus = poll_gpus(gpu_monitors)
         cpu_power = cpu_power_monitor.poll_watts()
         cpu_power_reason = cpu_power_monitor.unavailable_reason()
+        cpu_temps = get_cpu_temperatures()
         return {
             "system": system_snapshot(),
             "cpu_model": get_cpu_model_name(),
-            "cpu_temp_c": get_cpu_temperature(),
+            "cpu_temp_c": max(cpu_temps, default=None),
+            "cpu_temps_c": cpu_temps,
             "cpu_power_w": cpu_power,
+            "cpu_powers_w": cpu_power_monitor.cpu_watts,
             "cpu_power_reason": cpu_power_reason,
             "gpu": gpus[0],
             "gpus": gpus,

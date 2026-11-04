@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QGridLayout, QLabel, QWidget
+from PySide6.QtWidgets import QGridLayout, QLabel, QSizePolicy, QWidget
 
 from widgets.live_chart import LiveChart
 
@@ -26,6 +26,11 @@ class ResourceTile(QWidget):
         self.detail_label.setVisible(bool(detail))
         self.value_label = QLabel("0%")
         self.value_label.setObjectName("tileValue")
+        # Long names (e.g. "NVIDIA GeForce RTX 4090") are cut at the edge instead of
+        # widening the sidebar, which would then shift sideways on a touchpad swipe.
+        for label in (self.title_label, self.detail_label, self.value_label):
+            label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        self.detail_label.setToolTip(detail)
 
         self.chart = LiveChart(max_points=40, line_color=line_color, show_grid=False)
         self.chart.setFixedSize(66, 48)
@@ -46,6 +51,7 @@ class ResourceTile(QWidget):
     def set_detail(self, text: str) -> None:
         if text != self.detail_label.text():
             self.detail_label.setText(text)
+            self.detail_label.setToolTip(text)
             self.detail_label.setVisible(bool(text))
 
     def update_value(self, value: float, text: str | None = None) -> None:
