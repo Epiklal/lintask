@@ -276,6 +276,13 @@ jobs:
           name: lintask-bundles
           path: dist
 
+      # Classic snap: like the AppImage it uses the system's GL libraries, which
+      # every desktop has but the runner image lacks.
+      - name: Install desktop libraries
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends libegl1 libgl1 libfontconfig1
+
       - name: Install snap
         run: sudo snap install --dangerous --classic dist/*.snap
 
