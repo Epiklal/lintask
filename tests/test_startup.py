@@ -2,6 +2,7 @@
 even in a headless environment (uses the offscreen Qt platform plugin).
 """
 import os
+import shutil
 import unittest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -56,7 +57,9 @@ class TestStartup(unittest.TestCase):
         )
         for thread in threads:
             self.assertIsNotNone(thread)
-            self.assertTrue(thread.isRunning())
+            # Without Docker its worker reports "unavailable" and ends on its own.
+            if thread is not window.docker_page.worker or shutil.which("docker"):
+                self.assertTrue(thread.isRunning())
 
         window.close()
         QApplication.processEvents()

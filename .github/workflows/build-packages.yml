@@ -1,0 +1,324 @@
+# Builds every package format, tests each one on the distributions it is meant
+# for and attaches all of them to a GitHub release for a "v*" tag:
+#     .deb (Debian, Ubuntu, Mint)        .pkg.tar.zst (Arch)
+#     .rpm (Fedora, openSUSE)            AppImage, tar.gz, snap (any x86_64 distribution)
+# Every push to main and every manual start also build and test, but only keep
+# the packages as workflow artifacts.
+name: Build packages
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  deb:
+    name: .deb - build and test on Ubuntu
+    runs-on: ubuntu-latest
+    env:
+      DEBIAN_FRONTEND: noninteractive
+      MAINTAINER: "${{ github.repository_owner }} <${{ github.repository_owner }}@users.noreply.github.com>"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install lintian
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends lintian
+
+      - name: Build package
+        run: |
+          if [ "$GITHUB_REF_TYPE" = "tag" ]; then
+            ./build-deb.sh "${GITHUB_REF_NAME#v}"
+          else
+            ./build-deb.sh
+          fi
+          ls -l dist/
+          dpkg-deb --info dist/*.deb
+
+      # Like Linux Mint, ubuntu-latest has no PySide6 system packages: this also
+      # tests the route through /opt/lintask/venv (download from PyPI).
+      - name: Install package (smoke test)
+        run: |
+          sudo apt-get install -y ./dist/*.deb
+          test -x /usr/bin/lintask
+          test -f /usr/lib/systemd/system/lintask-server.service
+          test -L /usr/bin/wintaskmanager
+
+      - name: Start the application headless
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          lintask --server --help
+          set +e
+          timeout -s KILL 20 lintask
+          rc=$?
+          set -e
+          # 124 or 137 = still running after 20 s (ended by timeout; which one
+          # depends on the timeout implementation), anything else = crash
+          test "$rc" -eq 124 || test "$rc" -eq 137 || { echo "lintask exited with code $rc"; exit 1; }
+
+      - name: Run unit tests
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          # The package only creates the venv where the system has no PySide6
+          py=/opt/lintask/venv/bin/python
+          [ -x "$py" ] || py=/usr/bin/python3
+          "$py" -m unittest discover -s tests -t .
+
+      - name: Remove package again
+        run: |
+          sudo apt-get purge -y lintask
+          test ! -e /opt/lintask
+          test ! -e /usr/share/lintask
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: lintask-deb
+          path: dist/*.deb
+          if-no-files-found: error
+
+  arch:
+    name: Arch - build and test
+    runs-on: ubuntu-latest
+    container: archlinux:latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      # makepkg refuses to run as root, and -s needs sudo for the dependencies.
+      - name: Prepare build user
+        run: |
+          pacman -Syu --noconfirm --needed base-devel sudo
+          useradd -m builder
+          echo 'builder ALL=(ALL) NOPASSWD: ALL' > /etc/sudoers.d/builder
+          chown -R builder: .
+
+      - name: Build package
+        working-directory: packaging/arch
+        run: |
+          if [ "$GITHUB_REF_TYPE" = "tag" ]; then
+            # pkgver must not contain "-"
+            version="${GITHUB_REF_NAME#v}"
+            sed -i "s/^pkgver=.*/pkgver=${version//-/_}/" PKGBUILD
+          fi
+          sudo -u builder makepkg -s --noconfirm
+          ls -l ./*.pkg.tar.zst
+
+      - name: Install package (smoke test)
+        run: |
+          pacman -U --noconfirm packaging/arch/*.pkg.tar.zst
+          test -x /usr/bin/lintask
+          test -L /usr/bin/wintaskmanager
+          test -f /usr/lib/systemd/system/lintask-server.service
+
+      - name: Start the application headless
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          lintask --server --help
+          rc=0
+          timeout -k 5 15 lintask || rc=$?
+          test "$rc" -eq 124 || { echo "lintask exited with code $rc"; exit 1; }
+
+      - name: Run unit tests
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: python -B -m unittest discover -s tests -t .
+
+      - name: Remove package again
+        run: |
+          pacman -Rns --noconfirm lintask
+          test ! -e /usr/bin/lintask
+          test ! -e /usr/share/lintask
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: lintask-arch
+          path: packaging/arch/*.pkg.tar.zst
+          if-no-files-found: error
+
+  rpm:
+    name: .rpm - build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build package (Fedora container)
+        run: |
+          if [ "$GITHUB_REF_TYPE" = "tag" ]; then
+            ./build-rpm.sh --docker "${GITHUB_REF_NAME#v}"
+          else
+            ./build-rpm.sh --docker
+          fi
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: lintask-rpm
+          path: dist/*.rpm
+          if-no-files-found: error
+
+  rpm-test:
+    name: .rpm - test on ${{ matrix.image }}
+    needs: rpm
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        image: ['fedora:latest', 'opensuse/tumbleweed']
+    container: ${{ matrix.image }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: lintask-rpm
+          path: dist
+
+      # Installs with dnf/zypper, starts headless, runs the unit tests, removes.
+      - name: Install, start, test, remove
+        run: packaging/test-rpm.sh dist/*.noarch.rpm
+
+  bundle:
+    name: AppImage, tar.gz, snap - build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Python, appimagetool and the AppImage runtime (checked by SHA-256).
+      - uses: actions/cache@v4
+        with:
+          path: build/downloads
+          key: bundle-downloads-${{ hashFiles('build-bundle.sh') }}
+
+      - name: Build bundles (Ubuntu 22.04 container)
+        run: |
+          if [ "$GITHUB_REF_TYPE" = "tag" ]; then
+            ./build-bundle.sh --docker "${GITHUB_REF_NAME#v}"
+          else
+            ./build-bundle.sh --docker
+          fi
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: lintask-bundles
+          path: |
+            dist/*.AppImage
+            dist/*.tar.gz
+            dist/*.snap
+          if-no-files-found: error
+
+  bundle-test:
+    name: AppImage, tar.gz - test on ${{ matrix.image }}
+    needs: bundle
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - image: debian:13
+            install: >-
+              apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq
+              --no-install-recommends python3 xvfb libgl1 libegl1 libfontconfig1 libglib2.0-0t64
+              libdbus-1-3 libx11-xcb1 libxcb-render0 libxcb-randr0 libxcb-shape0 libxcb-sync1
+              libxcb-xfixes0 libxcb-shm0 libxrender1
+          - image: fedora:latest
+            install: >-
+              dnf -y -q install python3 xorg-x11-server-Xvfb mesa-libGL mesa-libEGL fontconfig
+              glib2 dbus-libs libX11-xcb libxcb findutils
+          - image: archlinux:latest
+            install: >-
+              pacman -Syu --noconfirm --needed python xorg-server-xvfb mesa libglvnd fontconfig
+              glib2 dbus libx11 libxcb
+          - image: opensuse/tumbleweed
+            install: >-
+              zypper -n -q in python3 gawk xorg-x11-server Mesa-libGL1 Mesa-libEGL1 fontconfig
+              libglib-2_0-0 libgthread-2_0-0 libdbus-1-3 libX11-xcb1 libxcb1 libxcb-render0
+              libxcb-randr0 libxcb-shape0 libxcb-sync1 libxcb-xfixes0 libxcb-shm0 tar gzip
+    container: ${{ matrix.image }}
+    steps:
+      - name: Install desktop libraries
+        run: ${{ matrix.install }}
+
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: lintask-bundles
+          path: dist
+
+      # Starts both bundles headless (and the AppImage on Xvfb), runs the unit
+      # tests with the bundled Python and Qt.
+      - name: Start and test
+        run: |
+          # Artifacts lose the executable bit.
+          chmod +x dist/*.AppImage
+          packaging/test-bundle.sh dist/*.AppImage dist/*-linux-x86_64.tar.gz
+
+  snap-test:
+    name: snap - install and test on Ubuntu
+    needs: bundle
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: lintask-bundles
+          path: dist
+
+      - name: Install snap
+        run: sudo snap install --dangerous --classic dist/*.snap
+
+      - name: Start the application headless
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          /snap/bin/lintask --server --help
+          rc=0
+          timeout -k 5 15 /snap/bin/lintask || rc=$?
+          test "$rc" -eq 124 || { echo "lintask exited with code $rc"; exit 1; }
+
+      - name: Remove snap again
+        run: |
+          sudo snap remove lintask
+          test ! -e /snap/bin/lintask
+
+  release:
+    name: Publish GitHub Release
+    if: github.ref_type == 'tag'
+    needs: [deb, arch, rpm-test, bundle-test, snap-test]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: lintask-*
+          path: dist
+          merge-multiple: true
+
+      - name: Checksums
+        working-directory: dist
+        run: |
+          sha256sum -- * > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Create or update the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" dist/* --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" dist/* \
+              --title "Lintask $GITHUB_REF_NAME" --generate-notes
+          fi

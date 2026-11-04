@@ -21,6 +21,10 @@ English and German; it follows your system language and can be switched in the s
 - [Upgrading from WinTaskManager](#upgrading-from-wintaskmanager)
 - [Debian package (.deb)](#debian-package-deb)
 - [Arch package (PKGBUILD)](#arch-package-pkgbuild)
+- [RPM package (Fedora, openSUSE)](#rpm-package-fedora-opensuse)
+- [AppImage and tarball (any distribution)](#appimage-and-tarball-any-distribution)
+- [Snap](#snap)
+- [Why there is no Flatpak](#why-there-is-no-flatpak)
 - [Feature guide (every tab)](#feature-guide)
 - [Design and color schemes](#design-and-color-schemes)
 - [Remote monitoring (server mode)](#remote-monitoring-server-mode)
@@ -97,10 +101,11 @@ different today.
 
 ## What gets installed
 
-This section describes `./install.sh`. On Debian, Ubuntu and Linux Mint you can use
-the [Debian package (.deb)](#debian-package-deb) instead: `apt` then installs
-everything listed here as package dependencies, and the package takes care of
-PySide6 itself (see there).
+This section describes `./install.sh`. With the [Debian package](#debian-package-deb),
+the [Arch package](#arch-package-pkgbuild) or the [RPM](#rpm-package-fedora-opensuse)
+the package manager installs everything listed here as package dependencies instead;
+the [AppImage, tarball and snap](#appimage-and-tarball-any-distribution) bring
+Python, PySide6 and psutil along and install nothing system-wide.
 
 `./install.sh` asks for your password once (for the package manager) and then
 installs:
@@ -205,7 +210,12 @@ there the package downloads PySide6 from PyPI into `/opt/lintask/venv` while
 it is being installed (internet connection needed once). On Arch Linux and its
 derivatives (Manjaro, EndeavourOS, CachyOS, ...) the [Arch package](#arch-package-pkgbuild)
 uses the distribution's own `pyside6` and `python-psutil` packages, so nothing is
-downloaded from PyPI. The `./install.sh` installer supports:
+downloaded from PyPI. The [RPM package](#rpm-package-fedora-opensuse) does the same
+on Fedora and openSUSE Tumbleweed with `python3-pyside6` and `python3-psutil`. The
+[AppImage, the tarball and the snap](#appimage-and-tarball-any-distribution) bring
+their own Python, PySide6 and psutil and run on any 64-bit x86 distribution with
+glibc 2.35 or newer (Ubuntu 22.04, Debian 12, Fedora 36, openSUSE Leap 15.6 and
+everything since). The `./install.sh` installer supports:
 
 | Distribution family | Package manager |
 | --- | --- |
@@ -237,12 +247,27 @@ distribution, which is untested.
 
 ## Install
 
-On **Debian, Ubuntu, Linux Mint** and other `apt`-based systems, the easiest way is
-the [Debian package](#debian-package-deb) below: one `.deb` file from the
-[Releases page](https://github.com/Epiklal/lintask/releases)
-that installs the application together with everything it needs. On **Arch Linux**
-and its derivatives, build and install the [Arch package](#arch-package-pkgbuild)
-below with `makepkg -si`. On all other distributions, use the installer script:
+Every release on the [Releases page](https://github.com/Epiklal/lintask/releases)
+has a ready-made package for each of these, plus a `SHA256SUMS` file to check the
+downloads (`sha256sum -c --ignore-missing SHA256SUMS`):
+
+| Your system | File | Install with | Details |
+| --- | --- | --- | --- |
+| Debian 13, Ubuntu 24.04, Linux Mint 22 and newer | `lintask_<version>_all.deb` | `sudo apt install ./lintask_*.deb` | [Debian package](#debian-package-deb) |
+| Arch Linux, Manjaro, EndeavourOS, CachyOS | `lintask-<version>-1-any.pkg.tar.zst` | `sudo pacman -U ./lintask-*.pkg.tar.zst` | [Arch package](#arch-package-pkgbuild) |
+| Fedora, openSUSE Tumbleweed | `lintask-<version>-1.noarch.rpm` | `sudo dnf install ./lintask-*.rpm` / `sudo zypper install ./lintask-*.rpm` | [RPM package](#rpm-package-fedora-opensuse) |
+| Any x86-64 distribution (glibc 2.35+) | `lintask-<version>-x86_64.AppImage` | `chmod +x` and start it, nothing to install | [AppImage](#appimage-and-tarball-any-distribution) |
+| Any x86-64 distribution (glibc 2.35+) | `lintask-<version>-linux-x86_64.tar.gz` | unpack and start `./lintask` | [Tarball](#appimage-and-tarball-any-distribution) |
+| Any distribution with `snapd` | `lintask_<version>_amd64.snap` | `sudo snap install --dangerous --classic ./lintask_*.snap` | [Snap](#snap) |
+
+The `.deb`, the Arch package and the RPM use the Python and Qt of your distribution,
+get the menu entry, the systemd service for the server mode and the hardware helper,
+and are updated through the package manager. The AppImage, the tarball and the snap
+are self-contained (about 60-70 MB). There is no Flatpak, see
+[Why there is no Flatpak](#why-there-is-no-flatpak).
+
+To run from source instead, or on a distribution not listed above, use the
+installer script:
 
 ```bash
 git clone https://github.com/Epiklal/lintask.git
@@ -359,9 +384,18 @@ starts the packaged version.
 
 ### Arch package (PKGBUILD)
 
-On Arch Linux, Manjaro, EndeavourOS, CachyOS and other `pacman`-based systems, build
-the package from the repository with the `PKGBUILD` in `packaging/arch/` and install
-it (`makepkg` needs `base-devel` and `git`; `-s` installs the dependencies, `-i`
+On Arch Linux, Manjaro, EndeavourOS, CachyOS and other `pacman`-based systems,
+download the latest `lintask-<version>-1-any.pkg.tar.zst` from the
+[Releases page](https://github.com/Epiklal/lintask/releases) and install it;
+`pacman` pulls in the dependencies from the official repositories:
+
+```bash
+cd ~/Downloads
+sudo pacman -U ./lintask-*.pkg.tar.zst
+```
+
+**Build it yourself** from the repository with the `PKGBUILD` in `packaging/arch/`
+(`makepkg` needs `base-devel` and `git`; `-s` installs the dependencies, `-i`
 installs the finished package):
 
 ```bash
@@ -376,7 +410,8 @@ packages; there is no `pip` download and no virtual environment. The optional to
 (`smartmontools`, `dmidecode`, `lm_sensors`, `pciutils`, `sysbench`, `fio`,
 `glmark2`, `qt6-wayland`, ...) are listed as optional dependencies when the package
 is installed; install the ones you want with `pacman`. The package is not in the
-AUR, so updates are built the same way (see [Update](#update)).
+AUR, so updates come from the Releases page or are built the same way (see
+[Update](#update)).
 
 The installed layout matches the Debian package, with these differences:
 
@@ -391,15 +426,135 @@ There is no `setup-venv` and no `/opt/lintask/venv`. The `.pkg.tar.zst` file
 and the `pkg/` and `src/` directories that `makepkg` creates in `packaging/arch/`
 are ignored by git.
 
+### RPM package (Fedora, openSUSE)
+
+On Fedora and openSUSE Tumbleweed, download the latest
+`lintask-<version>-1.noarch.rpm` from the
+[Releases page](https://github.com/Epiklal/lintask/releases) and install it. The
+package manager pulls in PySide6 and psutil from the distribution's repositories:
+
+```bash
+cd ~/Downloads
+sudo dnf install ./lintask-*.noarch.rpm                          # Fedora
+sudo zypper install --allow-unsigned-rpm ./lintask-*.noarch.rpm  # openSUSE
+```
+
+The package is not signed, which is why `zypper` needs `--allow-unsigned-rpm`;
+check the file against `SHA256SUMS` from the same release instead. `smartmontools`,
+`dmidecode`, `lm_sensors`, `pciutils` and `sudo` are installed as weak dependencies
+if available; `sysbench`, `fio`, `glmark2` and `docker` are suggested and can be
+installed with `dnf`/`zypper` when you want them. Where the repositories have no
+PySide6 6.6 or newer (for example openSUSE Leap or RHEL-based systems such as Rocky
+and Alma), use the [AppImage](#appimage-and-tarball-any-distribution) instead.
+
+**Build it yourself** with `rpmbuild` (package `rpm-build`), or in a Fedora
+container with `--docker`:
+
+```bash
+git clone https://github.com/Epiklal/lintask.git
+cd lintask
+./build-rpm.sh            # or: ./build-rpm.sh --docker
+sudo dnf install ./dist/lintask-*.noarch.rpm
+```
+
+The installed layout matches the Debian package (helper in
+`/usr/libexec/lintask/`, service `lintask-server`, configuration in
+`/etc/default/lintask-server` with mode 600). A changed configuration is kept as
+`.rpmsave` on removal.
+
+### AppImage and tarball (any distribution)
+
+The AppImage and the tarball contain their own Python 3.12, PySide6 and psutil and
+need nothing from the distribution except a desktop (X11 or Wayland) and glibc 2.35
+or newer on 64-bit x86. Nothing is installed system-wide.
+
+**AppImage** - one file, download it, make it executable and start it:
+
+```bash
+cd ~/Downloads
+chmod +x lintask-*-x86_64.AppImage
+./lintask-*-x86_64.AppImage
+```
+
+If it reports that FUSE is missing (`libfuse.so.2`), either install FUSE
+(`fuse2`/`libfuse2`) or let it unpack itself on each start:
+`APPIMAGE_EXTRACT_AND_RUN=1 ./lintask-*-x86_64.AppImage`. For a menu entry, use a
+tool such as Gear Lever or AppImageLauncher, or copy the AppImage to
+`~/Applications/`.
+
+**Tarball** - unpack it anywhere and start `lintask` in the folder:
+
+```bash
+tar -xzf lintask-*-linux-x86_64.tar.gz -C ~/.local/opt   # any folder works
+~/.local/opt/lintask-*-x86_64/lintask
+```
+
+For the command and the menu entry, link the launcher and copy the desktop file
+and icon from the folder:
+
+```bash
+dir=$(echo ~/.local/opt/lintask-*-x86_64)
+ln -sf "$dir/lintask" ~/.local/bin/lintask
+cp "$dir/share/applications/lintask.desktop" ~/.local/share/applications/
+mkdir -p ~/.local/share/icons/hicolor/scalable/apps
+cp "$dir/share/icons/hicolor/scalable/apps/lintask.svg" ~/.local/share/icons/hicolor/scalable/apps/
+```
+
+Both work like the installer script: settings are in `~/.config/Lintask/`, and
+**Settings → Set up hardware data with sudo** installs the helper to
+`/usr/local/libexec/lintask-smartctl`. There is no systemd service; for the
+server mode see [Run the server permanently](#4-run-the-server-permanently-systemd).
+The optional tools (`smartmontools`, `dmidecode`, `lm-sensors`, `sysbench`, ...)
+come from your package manager as usual.
+
+**Build them yourself** with `./build-bundle.sh --docker` (Docker builds in an
+Ubuntu 22.04 container, which sets the glibc requirement). It downloads a
+standalone Python build and the AppImage tools, checked by SHA-256, and writes the
+AppImage, the tarball and the snap to `dist/`.
+
+### Snap
+
+The snap is the same bundle as the tarball. It uses *classic* confinement, because
+a task manager has to see all processes, services and devices, and it is not in the
+Snap Store, so install the file from the
+[Releases page](https://github.com/Epiklal/lintask/releases) with `--dangerous`
+(no Store signature) and `--classic`:
+
+```bash
+cd ~/Downloads
+sudo snap install --dangerous --classic ./lintask_*_amd64.snap
+lintask
+```
+
+The menu entry is created by `snapd`. Snaps installed from a file are not updated
+automatically; install the new file the same way (see [Update](#update)).
+
+### Why there is no Flatpak
+
+A Flatpak runs in its own PID namespace and sandbox. Lintask would only see its own
+processes, could not reach `systemctl` for the Services tab, the Docker socket, SMART
+data or `sudo`, and could not end or prioritise other programs. Opening the sandbox
+far enough for that (`--talk-name=org.freedesktop.Flatpak` and running everything
+through `flatpak-spawn --host`) would remove what Flatpak is for and is not accepted
+on Flathub. Use the [AppImage](#appimage-and-tarball-any-distribution) instead: it
+runs on the same distributions without a sandbox.
+
 ## Run
 
 Start **Lintask** from your application menu. The entry sits in the *System*
 category (Cinnamon: *Administration* / *System Tools*); typing `task` or
-`lintask` into the menu search finds it. From a terminal, with the Debian
-or Arch package:
+`lintask` into the menu search finds it. From a terminal, with the Debian,
+Arch or RPM package or the snap:
 
 ```bash
 lintask
+```
+
+with the AppImage or the tarball:
+
+```bash
+./lintask-*-x86_64.AppImage
+~/.local/opt/lintask-*-x86_64/lintask     # the folder you unpacked the tarball to
 ```
 
 or from the project folder when installed with `./install.sh`:
@@ -433,7 +588,9 @@ sudo apt install ./dist/lintask_*.deb
 An existing `/opt/lintask/venv` with a current PySide6 is kept, so an update
 normally needs no download.
 
-Arch package - pull the new sources and build the package again (raise `pkgrel` in
+Arch package - download the new `.pkg.tar.zst` from the Releases page and install it
+with `sudo pacman -U ./lintask-*.pkg.tar.zst`, or pull the new sources and build the
+package again (raise `pkgrel` in
 the `PKGBUILD` if the version number has not changed, otherwise `pacman` reports the
 same version):
 
@@ -444,6 +601,22 @@ cd packaging/arch
 makepkg -si
 ```
 
+RPM package - download the new `.rpm` and install it over the old one:
+
+```bash
+sudo dnf install ./lintask-*.noarch.rpm                          # Fedora
+sudo zypper install --allow-unsigned-rpm ./lintask-*.noarch.rpm  # openSUSE
+```
+
+AppImage - download the new file, make it executable and delete the old one.
+Tarball - unpack the new archive and delete the old folder (update the
+`~/.local/bin/lintask` link if you created one). Snap - install the new file the
+same way as the first time:
+
+```bash
+sudo snap install --dangerous --classic ./lintask_*_amd64.snap
+```
+
 Installer script:
 
 ```bash
@@ -452,7 +625,7 @@ git pull
 ./install.sh
 ```
 
-Your settings are kept in both cases.
+Your settings are kept in all cases.
 
 ## Upgrading from WinTaskManager
 
@@ -515,6 +688,28 @@ This also stops and disables the service and removes the sudo rule for the packa
 helper and the RAPL udev rule. The server configuration is kept as
 `/etc/default/lintask-server.pacsave` if you changed it.
 
+RPM package:
+
+```bash
+sudo dnf remove lintask        # Fedora
+sudo zypper remove lintask     # openSUSE
+rm -r ~/.config/Lintask ~/.local/state/Lintask   # optional: settings and history
+```
+
+Like the Arch package, this stops and disables the service and removes the sudo rule
+for the packaged helper and the RAPL udev rule; a changed server configuration is
+kept as `/etc/default/lintask-server.rpmsave`.
+
+AppImage, tarball and snap:
+
+```bash
+rm lintask-*-x86_64.AppImage                  # AppImage: just delete the file
+rm -r ~/.local/opt/lintask-*-x86_64 ~/.local/bin/lintask \
+      ~/.local/share/applications/lintask.desktop   # tarball, with the menu entry
+sudo snap remove lintask                      # snap
+rm -r ~/.config/Lintask ~/.local/state/Lintask   # optional: settings and history
+```
+
 Installer script:
 
 ```bash
@@ -523,9 +718,10 @@ rm -r ~/.config/Lintask ~/.local/state/Lintask
 rm -r lintask      # the project folder, including .venv
 ```
 
-If you used **Set up hardware data with sudo** with the installer script, also
-remove the helper, its sudo rule and the RAPL udev rule (with the .deb or the Arch
-package the helper belongs to the package and is removed with it):
+If you used **Set up hardware data with sudo** with the installer script, the
+AppImage, the tarball or the snap, also remove the helper, its sudo rule and the
+RAPL udev rule (with the .deb, the Arch package or the RPM the helper belongs to the
+package and is removed with it):
 
 ```bash
 sudo rm /etc/sudoers.d/lintask-smartctl /usr/local/libexec/lintask-smartctl
@@ -782,18 +978,22 @@ server, NAS or VM.
 Install exactly as on the desktop: on Debian/Ubuntu/Mint download the `.deb` from
 the [Releases page](https://github.com/Epiklal/lintask/releases)
 (or build it on any machine with `./build-deb.sh`), copy it to the server and run
-`sudo apt install ./lintask_*.deb`; on Arch clone the repository and build
-the package (`cd packaging/arch && makepkg -si`); on other distributions clone the
-repository and run `./install.sh`. No desktop environment is
-needed, but PySide6 is: the server mode uses the same data-collection code as the
-desktop application, so the Qt packages (or the virtual environment) are required
-even on a headless server.
+`sudo apt install ./lintask_*.deb`; on Arch install the `.pkg.tar.zst` with
+`sudo pacman -U` (or build it with `cd packaging/arch && makepkg -si`); on Fedora and
+openSUSE install the `.rpm`; on any other x86-64 distribution copy the AppImage or
+the tarball to the server, or clone the repository and run `./install.sh`. No
+desktop environment is needed, but PySide6 is: the server mode uses the same
+data-collection code as the desktop application, so the Qt packages (or the virtual
+environment) are required even on a headless server. The AppImage and the tarball
+bring them along.
 
 ### 2. Start the server
 
 ```bash
-lintask --server      # Debian package
-./run.sh --server            # installer script, from the project folder
+lintask --server                      # Debian, Arch or RPM package, snap
+./lintask-*-x86_64.AppImage --server  # AppImage
+./lintask-*-x86_64/lintask --server   # tarball
+./run.sh --server                     # installer script, from the project folder
 ```
 
 Example output:
@@ -841,7 +1041,7 @@ Create a fixed token once:
 python3 -c "import secrets; print(secrets.token_urlsafe(24))"
 ```
 
-**Debian or Arch package:** the service `lintask-server` is already installed
+**Debian, Arch or RPM package:** the service `lintask-server` is already installed
 but not enabled. Put the token into `/etc/default/lintask-server` (readable by root
 only) and enable the service:
 
@@ -1065,7 +1265,10 @@ Project layout:
 | `widgets/` | Graphs, history chart, performance tiles, Windows 11 navigation pane, tables, right-click menus (`widgets/table_menu.py`) |
 | `build-deb.sh`, `packaging/debian/` | Debian package: build script, control file, maintainer scripts, launcher, PySide6 setup, systemd unit |
 | `packaging/arch/` | Arch package: `PKGBUILD`, launcher, `.install` script with the pacman hooks (`cd packaging/arch && makepkg -si`) |
-| `.github/workflows/build-deb.yml` | GitHub Actions: builds the `.deb`, installs it on Ubuntu as a test and attaches it to a GitHub Release for `v*` tags |
+| `build-rpm.sh`, `packaging/rpm/` | RPM package for Fedora and openSUSE: build script and `lintask.spec` (`--docker` builds in a Fedora container) |
+| `build-bundle.sh`, `packaging/icons/` | Self-contained AppImage, tarball and snap with their own Python, PySide6 and psutil (`--docker` builds in Ubuntu 22.04); the application icon |
+| `packaging/test-rpm.sh`, `packaging/test-bundle.sh` | Smoke tests for the RPM and the bundles: install or unpack, start headless, run the unit tests, remove |
+| `.github/workflows/build-packages.yml` | GitHub Actions: builds every package, tests it on the distributions it is meant for and attaches all of them to a GitHub Release for `v*` tags |
 
 Generated local files are excluded through `.gitignore`, including `.venv`, Python
 bytecode, test caches and the package build directories `build/`, `dist/` and
@@ -1075,18 +1278,28 @@ directory.
 
 ### Releasing a new version
 
-Push a tag that starts with `v`. GitHub Actions then builds the package with
-`./build-deb.sh <version>`, installs it on a fresh Ubuntu runner as a smoke test and
-publishes a GitHub Release with the `.deb` attached:
+Push a tag that starts with `v`. GitHub Actions then builds every package with the
+tag as version and tests it before anything is published:
+
+| Package | Built with | Tested on |
+| --- | --- | --- |
+| `.deb` | `./build-deb.sh <version>` | Ubuntu (install, start, unit tests, purge) |
+| `.pkg.tar.zst` | `makepkg` in `archlinux:latest` | Arch Linux (install, start, unit tests, remove) |
+| `.rpm` | `./build-rpm.sh --docker <version>` | Fedora and openSUSE Tumbleweed |
+| AppImage, `.tar.gz` | `./build-bundle.sh --docker <version>` | Debian 13, Fedora, Arch Linux, openSUSE Tumbleweed |
+| `.snap` | `./build-bundle.sh --docker <version>` | Ubuntu (`snap install --classic`, start, remove) |
+
+When all of them pass, the release job publishes a GitHub Release with every
+package and a `SHA256SUMS` file attached:
 
 ```bash
 git tag v1.1.2
 git push origin v1.1.2
 ```
 
-Every push to `main` and every manual run (**Actions** tab → *Build .deb* → *Run
-workflow*) builds and tests the package as well, but only stores it as a workflow
-artifact instead of creating a release.
+Every push to `main` and every manual run (**Actions** tab → *Build packages* →
+*Run workflow*) builds and tests the packages as well, but only stores them as
+workflow artifacts instead of creating a release.
 
 ## Contributing
 
