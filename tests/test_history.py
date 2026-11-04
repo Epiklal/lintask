@@ -842,6 +842,18 @@ class TestPage(unittest.TestCase):
         self.assertFalse(self.service.recording)
         self.assertFalse(self.settings.history_enabled)
 
+    def test_a_page_is_freed_without_the_cycle_collector(self):
+        # A page caught in a reference cycle made the interpreter abort at exit.
+        import gc
+        import weakref
+        from pages.history_page import HistoryPage
+        page = HistoryPage(self.settings, self.service)
+        reference = weakref.ref(page)
+        gc.disable()
+        self.addCleanup(gc.enable)
+        del page
+        self.assertIsNone(reference())
+
     def test_deleting_asks_first(self):
         from PySide6.QtWidgets import QMessageBox
         self.service.store.record({"cpu": 7.0})
