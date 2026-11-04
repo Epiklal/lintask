@@ -30,7 +30,6 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPushButton,
     QStyle,
-    QStyledItemDelegate,
     QStyleOptionViewItem,
     QVBoxLayout,
     QWidget,
@@ -40,6 +39,7 @@ from app.i18n import N_, format_decimal, tr
 from app.memory_info import MIB, PageOutResult, PageOutWorker, format_bytes, is_essential
 from app.system_info import ProcessRow, ProcessWorker, kill_process
 from widgets.resizable_table import ResizableRowsTableView
+from widgets.row_hover import RowHoverDelegate
 
 # Column order follows the Windows 10 "Processes" tab; PID/User/Threads come last.
 COLUMNS = [N_("Name"), N_("Status"), N_("CPU"), N_("RAM"), N_("Swap"), N_("GPU"), N_("GPU memory"),
@@ -376,7 +376,7 @@ class ProcessTableModel(QAbstractTableModel):
         )
 
 
-class NameColumnDelegate(QStyledItemDelegate):
+class NameColumnDelegate(RowHoverDelegate):
     """Draws the Name column Windows-10-style: indentation, a chevron for expandable
     groups, then icon + text. The selection/hover background still spans the full cell."""
 

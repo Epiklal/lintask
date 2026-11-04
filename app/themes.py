@@ -156,6 +156,7 @@ _WIN10_DARK_COLORS = {
     "#91c9f7": "#1f4f7a", "#d9ebf9": "#2a3a4a", "#0078d7": "#3a96dd",
     "#005499": "#3a96dd", "#7a7a7a": "#5a5a5a", "#838383": "#707070",
     "#707070": "#9a9a9a", "#4d4d4d": "#c8c8c8", "#4c4c4c": "#b4b4b4",
+    "#333333": "#c8c8c8", "#575757": "#e0e0e0", "#767676": "#5a5a5a",
 }
 
 
@@ -176,6 +177,7 @@ def win10_color_map(scheme: Scheme) -> dict[str, str]:
         "#91c9f7": s.selection, "#d9ebf9": s.hover, "#0078d7": s.accent,
         "#005499": s.accent, "#7a7a7a": s.border_strong, "#838383": _disabled(s),
         "#707070": s.subtext, "#4d4d4d": s.subtext, "#4c4c4c": s.subtext,
+        "#333333": s.subtext, "#575757": s.text, "#767676": s.border_strong,
     }
 
 

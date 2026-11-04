@@ -36,6 +36,7 @@ from app.memory_info import (
 )
 from app.themes import WIN10_CHART_COLORS
 from widgets.live_chart import LiveChart
+from widgets.row_hover import enable_row_hover
 
 _CHART_POINTS = 60
 _CHART_MIN_HEIGHT = 160
@@ -86,6 +87,7 @@ class MemoryPage(QWidget):
         cache_layout.addWidget(self.drop_btn, 0, Qt.AlignLeft)
 
         self.data_table = QTableWidget(0, 2)
+        enable_row_hover(self.data_table)
         self.data_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.data_table.setSelectionMode(QAbstractItemView.NoSelection)
         self.data_table.setFocusPolicy(Qt.NoFocus)

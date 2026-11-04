@@ -20,6 +20,7 @@ from PySide6.QtWidgets import (
 
 from app.i18n import N_, tr
 from app.system_info import StoppableWorker, WorkerStopped
+from widgets.row_hover import enable_row_hover
 
 COLUMNS = [N_("Name"), N_("Description"), N_("Status")]
 
@@ -83,6 +84,7 @@ class ServicesPage(QWidget):
         self.hint_label.hide()
 
         self.table = QTableWidget(0, len(COLUMNS))
+        enable_row_hover(self.table)
         self.table.setHorizontalHeaderLabels([tr(name) for name in COLUMNS])
         self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)

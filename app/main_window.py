@@ -7,7 +7,7 @@ from pathlib import Path
 from string import Template
 
 from PySide6.QtCore import Qt, QTimer
-from PySide6.QtGui import QAction, QActionGroup
+from PySide6.QtGui import QAction, QActionGroup, QColor
 from PySide6.QtWidgets import (
     QApplication,
     QHBoxLayout,
@@ -122,8 +122,56 @@ QStatusBar::item {
 }
 QTableView, QTableWidget {
     border: none;
+    outline: 0;
     selection-background-color: #cce8ff;
     selection-color: #000000;
+}
+QTableView::item:hover {
+    background-color: #e5f3ff;
+}
+QTableView::item:selected, QTableView::item:selected:hover {
+    background-color: #cce8ff;
+    color: #000000;
+}
+QToolTip {
+    background-color: #ffffff;
+    color: #575757;
+    border: 1px solid #767676;
+    padding: 2px 4px;
+}
+QCheckBox, QRadioButton {
+    spacing: 6px;
+}
+QCheckBox::indicator, QRadioButton::indicator {
+    width: 13px;
+    height: 13px;
+    background-color: #ffffff;
+    border: 1px solid #333333;
+    border-radius: 0;
+}
+QRadioButton::indicator {
+    border-radius: 7px;
+}
+QCheckBox::indicator:hover, QRadioButton::indicator:hover {
+    border-color: #0078d7;
+}
+QCheckBox::indicator:pressed, QRadioButton::indicator:pressed {
+    background-color: #cce4f7;
+    border-color: #005499;
+}
+QCheckBox::indicator:checked {
+    image: url("@CHECK@");
+}
+QRadioButton::indicator:checked {
+    background-color: qradialgradient(cx: 0.5, cy: 0.5, radius: 0.5, fx: 0.5, fy: 0.5,
+        stop: 0 #333333, stop: 0.48 #333333, stop: 0.56 #ffffff, stop: 1 #ffffff);
+}
+QRadioButton::indicator:checked:hover {
+    background-color: qradialgradient(cx: 0.5, cy: 0.5, radius: 0.5, fx: 0.5, fy: 0.5,
+        stop: 0 #0078d7, stop: 0.48 #0078d7, stop: 0.56 #ffffff, stop: 1 #ffffff);
+}
+QCheckBox::indicator:disabled, QRadioButton::indicator:disabled {
+    border-color: #cccccc;
 }
 QHeaderView::section {
     background-color: #ffffff;
@@ -146,6 +194,36 @@ QLineEdit:focus, QSpinBox:focus, QComboBox:focus {
 }
 QComboBox::drop-down {
     border-left: none;
+}
+QSpinBox::up-button, QSpinBox::down-button {
+    subcontrol-origin: padding;
+    width: 17px;
+    background-color: #f0f0f0;
+    border: none;
+    border-left: 1px solid #cccccc;
+}
+QSpinBox::up-button {
+    subcontrol-position: top right;
+    border-bottom: 1px solid #cccccc;
+}
+QSpinBox::down-button {
+    subcontrol-position: bottom right;
+}
+QSpinBox::up-button:hover, QSpinBox::down-button:hover {
+    background-color: #e5f1fb;
+}
+QSpinBox::up-button:pressed, QSpinBox::down-button:pressed {
+    background-color: #cce4f7;
+}
+QSpinBox::up-arrow {
+    image: url("@UP@");
+    width: 9px;
+    height: 9px;
+}
+QSpinBox::down-arrow {
+    image: url("@DOWN@");
+    width: 9px;
+    height: 9px;
 }
 QPushButton {
     background-color: #e1e1e1;
@@ -288,6 +366,24 @@ QTableView, QTableWidget {
     gridline-color: $border;
     selection-background-color: $selection;
     selection-color: $text;
+    outline: 0;
+}
+QTableView::item:hover {
+    background-color: $hover;
+}
+QTableView::item:selected, QTableView::item:selected:hover {
+    background-color: $selection;
+    color: $text;
+}
+QToolTip {
+    background-color: $card;
+    color: $text;
+    border: 1px solid $border_strong;
+    border-radius: 4px;
+    padding: 4px 8px;
+}
+QTabBar::tab:selected {
+    font-weight: normal;
 }
 QHeaderView::section {
     background-color: $content;
@@ -365,9 +461,24 @@ QCheckBox::indicator:unchecked, QRadioButton::indicator:unchecked {
     background-color: $card;
     border: 1px solid $scroll;
 }
-QCheckBox::indicator:checked, QRadioButton::indicator:checked {
+QCheckBox::indicator:unchecked:hover, QRadioButton::indicator:unchecked:hover {
+    background-color: $hover;
+}
+QCheckBox::indicator:checked {
     background-color: $accent;
     border: 1px solid $accent;
+    image: url("$check");
+}
+QRadioButton::indicator:checked {
+    border: 1px solid $accent;
+    background-color: qradialgradient(cx:0.5, cy:0.5, radius:0.5, fx:0.5, fy:0.5,
+        stop:0 $on_accent, stop:0.42 $on_accent, stop:0.5 $accent, stop:1 $accent);
+}
+QCheckBox::indicator:disabled, QRadioButton::indicator:disabled {
+    border-color: $disabled;
+}
+QCheckBox, QRadioButton {
+    spacing: 8px;
 }
 QGroupBox {
     background-color: $card;
@@ -398,6 +509,9 @@ QScrollBar::handle:vertical {
     border-radius: 3px;
     min-height: 30px;
     margin: 0 2px;
+}
+QScrollBar::handle:vertical:hover, QScrollBar::handle:horizontal:hover {
+    background-color: $sub;
 }
 QScrollBar:horizontal {
     background: transparent;
@@ -474,11 +588,27 @@ def build_qss(theme: str, style: str = "win10") -> str:
     if style == "win11":
         icon = "dark" if scheme.dark else "light"
         chevron = (_ICON_DIR / f"chevron_down_{icon}.svg").as_posix()
-        return f"{base}\n{_WIN11_QSS.substitute(win11_palette(scheme), chevron=chevron)}"
+        palette = win11_palette(scheme)
+        # The check mark sits on the accent fill, so it follows the on-accent colour.
+        check = _check_icon(_is_dark(palette["on_accent"]))
+        return f"{base}\n{_WIN11_QSS.substitute(palette, chevron=chevron, check=check)}"
     color_map = win10_color_map(scheme)
     win10 = re.sub(r"#[0-9a-fA-F]{6}",
                    lambda m: color_map.get(m.group(0).lower(), m.group(0)), _WIN10_QSS)
+    win10 = win10.replace("@CHECK@", _check_icon(not scheme.dark))
+    icon = "dark" if scheme.dark else "light"
+    for key, name in (("@UP@", "chevron_up"), ("@DOWN@", "chevron_down")):
+        win10 = win10.replace(key, (_ICON_DIR / f"{name}_{icon}.svg").as_posix())
     return f"{base}\n{win10}"
+
+
+def _check_icon(dark_mark: bool) -> str:
+    return (_ICON_DIR / f"check_{'light' if dark_mark else 'dark'}.svg").as_posix()
+
+
+def _is_dark(color: str) -> bool:
+    c = QColor(color)
+    return 0.299 * c.red() + 0.587 * c.green() + 0.114 * c.blue() < 128
 
 
 # (icon, page title) per main tab, used by the Windows 11 navigation pane.
@@ -539,7 +669,6 @@ QTabBar::tab {{
 QTabBar::tab:selected {{
     color: {p['tab_selected']};
     border-bottom: 2px solid #0078d4;
-    font-weight: 600;
 }}
 QTabBar::tab:hover:!selected {{
     background-color: {p['hover']};
@@ -555,7 +684,8 @@ QTableView, QTableWidget {{
     gridline-color: {p['border']};
     selection-background-color: {p['sel_bg']};
     selection-color: {p['sel_fg']};
-    border: 1px solid {p['border']};
+    border: none;
+    outline: 0;
 }}
 QHeaderView::section {{
     background-color: {p['header_bg']};
@@ -588,14 +718,6 @@ QCheckBox::indicator, QRadioButton::indicator {{
     width: 14px;
     height: 14px;
 }}
-QCheckBox::indicator:unchecked, QRadioButton::indicator:unchecked {{
-    background-color: {p['input_bg']};
-    border: 1px solid {p['input_border']};
-}}
-QCheckBox::indicator:checked, QRadioButton::indicator:checked {{
-    background-color: #0078d4;
-    border: 1px solid #0078d4;
-}}
 QPushButton {{
     background-color: {p['input_bg']};
     border: 1px solid {p['input_border']};
@@ -619,7 +741,7 @@ QScrollBar::handle:vertical {{
     min-height: 28px;
 }}
 QScrollBar::handle:vertical:hover {{
-    background-color: #999999;
+    background-color: {p['tile_value']};
 }}
 QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical,
 QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical,
@@ -672,15 +794,12 @@ QLabel#statKeyValue {{
 QWidget#resourceTile {{
     background-color: {p['tile_bg']};
     border: none;
-    border-left: 3px solid transparent;
 }}
 QWidget#resourceTile[selected="true"] {{
-    background-color: {p['hover']};
-    border-left-color: #00b7c3;
+    background-color: {p['sel_bg']};
 }}
 QPushButton:checked {{
-    background-color: #333333;
-    border-color: #00b7c3;
+    background-color: {p['sel_bg']};
 }}
 """
 

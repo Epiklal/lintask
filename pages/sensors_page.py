@@ -14,6 +14,7 @@ from PySide6.QtWidgets import (
 
 from app.i18n import format_decimal, tr
 from app.system_info import list_hardware_sensors
+from widgets.row_hover import enable_row_hover
 
 
 class SensorsPage(QWidget):
@@ -30,6 +31,7 @@ class SensorsPage(QWidget):
         top.addWidget(refresh_button)
 
         self.table = QTableWidget(0, 5)
+        enable_row_hover(self.table)
         self.table.setHorizontalHeaderLabels(
             [tr("Category"), tr("Sensor"), tr("Value"), tr("Unit"), tr("Source")]
         )

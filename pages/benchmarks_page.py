@@ -28,6 +28,7 @@ from PySide6.QtWidgets import (
 from app.i18n import N_, format_decimal, tr
 from app.system_info import StoppableWorker, WorkerStopped, list_physical_disks
 from app.remote_client import RemoteBenchmarkWorker
+from widgets.row_hover import enable_row_hover
 
 _BENCHMARKS = {
     "cpu": (N_("CPU"), "sysbench"),
@@ -187,6 +188,7 @@ class BenchmarksPage(QWidget):
         self.status = QLabel(tr("Ready"))
         self.status.setObjectName("detailInfo")
         self.results = QTableWidget(0, 3)
+        enable_row_hover(self.results)
         self.results.setHorizontalHeaderLabels([tr("Area"), tr("Result"), tr("Test")])
         self.results.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.results.setSelectionBehavior(QAbstractItemView.SelectRows)

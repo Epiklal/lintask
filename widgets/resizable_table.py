@@ -6,6 +6,8 @@ from __future__ import annotations
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QTableView, QTableWidget
 
+from widgets.row_hover import enable_row_hover
+
 _MIN_ROW_HEIGHT = 18
 _MAX_ROW_HEIGHT = 60
 _STEP = 2
@@ -15,6 +17,7 @@ class ResizableRowsMixin:
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self._row_height_callback = None
+        enable_row_hover(self)
 
     def set_row_height_callback(self, callback) -> None:
         """Registered callback(new_height: int) fires whenever Ctrl+wheel resizes rows,
