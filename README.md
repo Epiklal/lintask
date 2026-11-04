@@ -32,7 +32,9 @@ English and German; it follows your system language and can be switched in the s
 
 ## Screenshots
 
-The screenshots show the German interface.
+The screenshots show the German interface and were taken before version 1.1.2, so a
+few details (right-click menus, the Memory entry under Performance) look slightly
+different today.
 
 | Windows 10, light | Windows 11, light |
 | --- | --- |
@@ -42,7 +44,7 @@ The screenshots show the German interface.
 | Windows 10, dark | Windows 11, dark |
 | --- | --- |
 | ![One graph per logical processor](docs/screenshots/win10-dark-performance-cores.png) | ![Memory view in the Windows 11 design](docs/screenshots/win11-dark-performance.png) |
-| One graph per logical processor ("Per core") | Memory usage |
+| One graph per logical processor ("Logical processors") | Memory usage |
 | ![GPU view](docs/screenshots/win10-dark-gpu.png) | ![Settings in the Windows 11 design](docs/screenshots/win11-dark-settings.png) |
 | GPU engines, dedicated and shared GPU memory | Settings: language, design, color scheme, refresh rates, remote server |
 | ![Network view](docs/screenshots/win10-dark-network.png) | |
@@ -67,18 +69,27 @@ The screenshots show the German interface.
   headers, search, end task, run new task and drag & drop to start programs.
 - **History** of CPU, memory, swap, disks, network, temperatures and GPU, kept for up to a
   year in a small local file. Also shows the history of a server in remote mode.
-- **Performance** graphs for CPU (overall or per logical processor), memory, every
-  physical disk, network (auto-scaled, send/receive) and GPU (selectable engines,
-  dedicated and shared memory).
-- **Memory view** under Performance with one graph for RAM and swap and a plain rating of
+- **Performance** graphs for CPU (overall or per logical processor, laid out like on
+  Windows), memory, every physical disk, network (auto-scaled, send/receive) and every
+  GPU (selectable engines, dedicated and shared memory).
+- **Memory** under Performance with one graph for RAM and swap and a plain rating of
   whether memory is actually tight. A data view lists everything else: kernel figures,
   swap devices, every module and the module temperatures.
+- **Every GPU is detected**: AMD, NVIDIA and Intel (including Arc), also on systems with
+  several GPUs. Multi-socket boards show each CPU separately.
 - **Detailed hardware data**: CPU temperature and frequency, RAM speed and module
   temperature, SMART disk data, GPU model, driver, temperature, power and PCIe link.
+- **Right-click menus** on every table and on the performance page, as on Windows: the
+  actions of the page's buttons plus *Copy* and *Copy all* (pastes into a spreadsheet).
 - **Sensors**, **systemd services**, **Docker containers** (start/stop/restart/remove,
   favorites, custom names and pictures) and **autostart entries** (enable/disable).
 - **Benchmarks** for CPU, memory, GPU and disk using established Linux tools.
-- **Two designs** (Windows 10 / Windows 11) and **11 color schemes**.
+- **Two designs** (Windows 10 / Windows 11) and **11 color schemes**, looking like the
+  Windows Task Manager down to hover, selection and buttons.
+- **Scales with the screen**: the interface looks the same on 720p, 1080p, 4K or 8K,
+  worked out per screen; a fixed size can be set in the settings.
+- **Always on top** (also on KDE Plasma Wayland) and a **default start page**; window
+  size, position and the CPU view are remembered.
 - **Server mode**: monitor a headless machine over the network, protected by an
   access token.
 - **Customizable**: refresh rates, column widths and row height are remembered, and
@@ -147,7 +158,7 @@ for your user group, right away and on every boot through a udev rule
 eudev). Since Linux 5.10 the kernel makes them readable only by root (because of
 the PLATYPUS side channel, CVE-2020-8694: programs that can read the counters may be
 able to derive secrets from them), so without this the CPU power draw (and on Intel the
-iGPU power draw) shows *Keine Leseberechtigung*. The unlock applies to every program of
+iGPU power draw) shows *No read permission*. The unlock applies to every program of
 your user group, so skip the setup if you run untrusted code under that group. On NixOS `/etc` is read-only: the
 setup unlocks the counters until the next reboot and prints the
 `services.udev.extraRules` line to add to `/etc/nixos/configuration.nix`.
@@ -284,7 +295,7 @@ sudo apt install ./dist/lintask_*.deb
 
 `build-deb.sh` only needs `dpkg-deb` (package `dpkg`, part of every Debian-based
 system); no `debhelper`, no `venv`, no `pip`. It prints the name of the finished file,
-e.g. `dist/lintask_1.0.0+20261025.1459.g854e76c_all.deb` (the version contains
+e.g. `dist/lintask_1.1.2+20261104.1200.gac3cc53_all.deb` (the version contains
 the build time and the Git commit; pass your own with `./build-deb.sh 1.2.3`). If
 `dist/` already holds older builds, install the file the script printed instead of
 using the `*` wildcard.
@@ -534,8 +545,8 @@ package manager if you no longer need them.
 
 ## Feature guide
 
-The tab names are the English ones; the German interface shows *Prozesse*,
-*Leistung*, *Sensoren*, *Dienste* and *Einstellungen* instead.
+The tab and button names are the English ones; the German interface shows *Prozesse*,
+*Verlauf*, *Leistung*, *Sensoren*, *Dienste* and *Einstellungen* instead.
 
 ### Processes
 
@@ -545,12 +556,12 @@ The tab names are the English ones; the German interface shows *Prozesse*,
 - **Heat map**: the busier a process, the stronger its cells are colored (yellow in
   the Windows 10 design, blue in Windows 11, scheme colors otherwise).
 - **Grouping**: sorted by name (the default), processes are split into *Apps* (your
-  own processes) and *Hintergrundprozesse* (background processes). Processes with the
+  own processes) and *Background processes*. Processes with the
   same name are combined into one group, e.g. `bash (18)`, with summed values.
   Click the arrow to expand or collapse a group.
 - **Sorting**: click a column header; click again to reverse.
 - **Search**: filter by process name.
-- **Task beenden** (end task): select a process and click the button (Windows 10:
+- **End task**: select a process and click the button (Windows 10:
   bottom right, Windows 11: page header). You are asked for confirmation; the process
   first gets a normal terminate signal and is killed only if it does not exit within
   two seconds.
@@ -568,21 +579,6 @@ The tab names are the English ones; the German interface shows *Prozesse*,
 - **Drag & drop**: drop executable files from your file manager onto the list to
   start them.
 - Program icons come from your desktop icon theme.
-
-### Memory
-
-Open **Performance** and select **Memory** on the left. Which program holds how much is in
-the [Processes](#processes) tab, in the *RAM* and *Swap* columns.
-
-- **Graph**: RAM as a solid line and swap as a dashed line in one graph, like receive and
-  send under Network.
-- **Values below the graph**: memory in use, available now, cache, swap and memory
-  pressure, with a plain rating of whether memory is actually tight. Cache is not counted
-  as used, because Linux gives it back on its own as soon as programs need it. Memory
-  pressure stays *Unknown* on a kernel without `/proc/pressure/memory`.
-- **Emptying the cache** is off unless you tick *Offer to empty the cache*, and it warns
-  you before it runs. It rarely helps: programs and files load more slowly until the
-  cache has filled up again. It needs the same setup.
 
 ### History
 
@@ -621,27 +617,44 @@ to turn that off.
 
 The left column shows a small live graph for every device; click one to see details.
 
-- **CPU**: utilization graph for the last 60 seconds. **Per core** switches to one
-  graph per logical processor. Below: utilization, speed, temperature, processes,
-  uptime, cores, logical processors and power draw (if the kernel provides it).
-- **Memory**: usage graph; used, available, cached and total
-  memory, RAM speed and module temperature.
+- **CPU**: utilization graph for the last 60 seconds. **Per core**, or right-click the
+  graph → **Change graph to** → *Overall utilization* / *Logical processors*, switches to
+  one graph per logical processor; the choice is remembered. With few threads the grid
+  is laid out like on Windows. Below: utilization, speed, temperature, processes,
+  uptime, cores, logical processors and power draw (if the kernel provides it). Boards
+  with several CPUs also show *Sockets* and the *Highest temperature*, and list each
+  CPU separately.
+- **Memory**: RAM as a solid line and swap as a dashed line in one graph, like receive
+  and send under Network. Which program holds how much is in the
+  [Processes](#processes) tab, in the *RAM* and *Swap* columns.
+  - **Values below the graph**: memory in use, available now, cache, swap and memory
+    pressure, with a plain rating of whether memory is actually tight. Cache is not
+    counted as used, because Linux gives it back on its own as soon as programs need it.
+    Memory pressure stays *Unknown* on a kernel without `/proc/pressure/memory`.
+  - **Data view**: kernel figures, swap devices, every memory module with speed and
+    temperature.
+  - **Emptying the cache** is off unless you tick *Offer to empty the cache*, and it
+    warns you before it runs. It rarely helps: programs and files load more slowly until
+    the cache has filled up again. It needs the setup under **Settings → Set up hardware
+    data with sudo**.
 - **Disk** (one entry per physical disk): active time; read and write speed,
   lifetime reads/writes, power cycles, power-on hours, used/total space and
   temperature (SMART values see [Hardware data notes](#hardware-data-notes)).
-- **Netzwerk** (network): receive (solid line) and send (dashed line). The graph
+- **Network**: receive (solid line) and send (dashed line). The graph
   scales automatically (shown top right, e.g. `10,0 MBit/s`). Also: adapter, link
   speed, IPv4 address and totals since boot.
-- **GPU**:
+- **GPU** (one entry per GPU; AMD, NVIDIA and Intel including Arc):
   - four engine graphs. Click an engine name (e.g. **3D ▾**) to choose what the
     graph shows (3D, copy, video decode, video encode, compute, memory controller,
     PCIe receive/send, ... depending on the driver).
-  - right-click a GPU graph for **Graph anzeigen als** (choose the metric) and
-    **Anzahl Graphen** (show 1 to 10 engine graphs).
+  - right-click a GPU graph for **Show graph as** (choose the metric) and
+    **Number of graphs** (show 1 to 10 engine graphs).
   - graphs for dedicated and shared GPU memory.
   - details: utilization, dedicated/shared/total GPU memory, GPU temperature,
     driver, driver version, physical location (PCI bus), PCIe generation and width,
     link status and power draw.
+- **Copy**: right-click a device on the left and choose **Copy** to copy its values and
+  details as plain text.
 
 ### Sensors
 
@@ -674,7 +687,7 @@ group).
 
 All XDG autostart entries of your user (`~/.config/autostart`) and of the system
 (`/etc/xdg/autostart`) with command, source and status, plus search and refresh.
-**Aktivieren/Deaktivieren** toggles the selected entry. System entries are never
+**Enable/Disable** toggles the selected entry. System entries are never
 edited directly: a personal override copy is created in `~/.config/autostart`, as
 the XDG specification intends.
 
@@ -686,8 +699,13 @@ responsive while a benchmark runs.
 ### Settings
 
 - **Appearance**: language (*System default*, *Deutsch*, *English*), design
-  (Windows 10 / Windows 11) and color scheme. *System default* uses your locale and
-  falls back to English; a change applies immediately, without a restart.
+  (Windows 10 / Windows 11), color scheme and **UI size**. *System default* uses your
+  locale and falls back to English; language, design and color scheme apply
+  immediately. **UI size** is *Automatic (screen resolution)* by default (see
+  [Design and color schemes](#design-and-color-schemes)) or a fixed 75 % to 400 %; it
+  takes effect after Lintask is restarted.
+- **Window management**: *Always on top* and the *Default start page* (the tab Lintask
+  opens with).
 - **Refresh rate**: refresh rate of the process list (200-5000 ms)
   and of the performance graphs (100-5000 ms).
 - **Remote server**: connect to a machine running in server mode.
@@ -698,8 +716,8 @@ responsive while a benchmark runs.
 ### Menus (Windows 10 design)
 
 - **File**: Run new task, Start file..., Exit.
-- **Options**: Always on top (whether this works depends on
-  your window manager - some Wayland compositors ignore it).
+- **Options**: Always on top (works on X11 and on KDE Plasma, Wayland included; some
+  other Wayland compositors ignore it) and **Set default tab**.
 - **View**: Style and Color scheme.
 
 The Windows 11 design has no menu bar, just like the original: the commands are in
@@ -711,6 +729,25 @@ the page headers, the options in **Settings**.
   is remembered per table.
 - Drag the border between two column headers to resize a column; widths are
   remembered.
+- **Right-click** works everywhere, see [Right-click menus](#right-click-menus).
+- Window size and position are remembered. Pages scroll when the window is small, so it
+  can be made as small as you like.
+
+### Right-click menus
+
+Right-click a row in any table (Processes, Services, Autostart, Docker, Sensors,
+Benchmarks, History) and the row is selected first, then a menu shows:
+
+- the same actions as the page's buttons, enabled or disabled just like them. Choosing
+  one does exactly what the button does, confirmations included. The process list also
+  offers **Move to swap** there.
+- **Copy** (the selected rows) and **Copy all** (every row, with the column headers).
+  Both copy tab-separated text that pastes cleanly into a spreadsheet; hidden columns
+  are left out.
+
+On the **Performance** page right-click a device on the left to copy its values and
+details as plain text; on the CPU entry and the CPU graph the menu also switches between
+overall utilization and logical processors.
 
 ## Design and color schemes
 
@@ -718,13 +755,21 @@ Open **Settings → Appearance**:
 
 - **Design**: *Windows 10* (tabs, menu bar, footer) or *Windows 11* (navigation pane
   with icons, page headers, rounded controls, no menu bar or status bar).
-- **Farbschema**: Hell (light, default), Dunkel (dark), Nord, Dracula, Catppuccin
+- **Color scheme**: Light (default), Dark, Nord, Dracula, Catppuccin
   Mocha, Catppuccin Latte, Gruvbox Dark, Tokyo Night, One Dark, Solarized Dark or
   Solarized Light.
 
 Every color scheme works with both designs and also changes the graph colors and
 the heat map. In the Windows 10 design both options are also in the menu under
 **View**. Changes apply immediately.
+
+**UI size**: Lintask scales its interface with the screen, so it looks the same on a
+720p laptop as on a 4K or 8K monitor. The reference is 1080p and the shorter side of the
+screen counts (720p → 75 %, 1440p → 125 %, 4K → 200 %, 8K → 400 %, in steps of 25 %).
+With several monitors every screen gets its own factor. Scaling you already set for your
+desktop is taken into account, and `QT_SCALE_FACTOR` or `QT_SCREEN_SCALE_FACTORS`
+exported by yourself always win. Pick a fixed size under **Settings → Appearance → UI
+size** if you prefer; it takes effect after a restart.
 
 ## Remote monitoring (server mode)
 
@@ -765,6 +810,7 @@ Press Ctrl+C to quit
 | `--port PORT` | `8765` | TCP port |
 | `--token TOKEN` | *random* | Use your own access token instead of a random one. Visible to all users in the process list, so prefer the environment variable `LINTASK_SERVER_TOKEN` |
 | `--generate-token` | *(default behavior)* | Generate a random token; kept for compatibility |
+| `--no-history` | off | Don't record a history (the service records to `/var/lib/lintask/history.sqlite3`) |
 | `--no-auth` | off | Start **without** a token. Anyone who can reach the port can read all data and start benchmarks - only for trusted networks |
 
 Without a token of your own, a **new random token is generated on every start**. For a server
@@ -782,7 +828,7 @@ While connected, these tabs show the **server's** data: Processes, Performance,
 Sensors, Services, Docker and Autostart. Benchmarks started on the Benchmarks tab
 run **on the server**. Disable the checkbox to go back to local data.
 
-In remote mode the application is **read-only**: *Task beenden*, the actions in the
+In remote mode the application is **read-only**: *End task*, the actions in the
 memory view, autostart changes and Docker start/stop/restart/remove are disabled, because
 they would act on your local machine rather than on the server. Local-only things such as Docker favorites,
 names and pictures still work.
@@ -1009,9 +1055,14 @@ Project layout:
 | `app/system_info.py` | All data collection (processes, hardware, disks, GPU, Docker, autostart) |
 | `app/remote_server.py`, `app/remote_client.py` | Server mode and its client |
 | `app/history.py` | History: SQLite store, sampling and recording, free of Qt |
+| `app/memory_info.py` | Memory rating and the data view of the memory page |
+| `app/hardware_setup.py` | The *Set up hardware data with sudo* setup (helper, sudo and udev rules) |
+| `app/ui_scale.py` | UI scaling by screen resolution |
+| `app/window_on_top.py` | Always on top, including KDE Plasma Wayland (KWin scripting over D-Bus) |
+| `app/i18n.py`, `app/translations_de.py` | Translations |
 | `app/settings.py` | Persisted settings |
 | `pages/` | One module per tab |
-| `widgets/` | Graphs, performance tiles, Windows 11 navigation pane, tables |
+| `widgets/` | Graphs, history chart, performance tiles, Windows 11 navigation pane, tables, right-click menus (`widgets/table_menu.py`) |
 | `build-deb.sh`, `packaging/debian/` | Debian package: build script, control file, maintainer scripts, launcher, PySide6 setup, systemd unit |
 | `packaging/arch/` | Arch package: `PKGBUILD`, launcher, `.install` script with the pacman hooks (`cd packaging/arch && makepkg -si`) |
 | `.github/workflows/build-deb.yml` | GitHub Actions: builds the `.deb`, installs it on Ubuntu as a test and attaches it to a GitHub Release for `v*` tags |
