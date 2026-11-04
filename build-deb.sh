@@ -11,7 +11,7 @@ APP_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$APP_DIR"
 
 PKG=lintask
-BASE_VERSION=1.1.1
+BASE_VERSION=1.1.2
 MAINTAINER="${MAINTAINER:-ketchupboy <ketchupboy@ketchuppc.fritz.box>}"
 SRC=packaging/debian
 STAGE=build/deb

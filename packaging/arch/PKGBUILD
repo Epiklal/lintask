@@ -10,7 +10,7 @@
 # the checkout (packaging/arch/ and two levels above) instead of source=.
 
 pkgname=lintask
-pkgver=1.1.1
+pkgver=1.1.2
 pkgrel=1
 pkgdesc="Task manager for Linux: processes, performance, services, autostart, benchmarks, remote monitoring"
 arch=('any')
