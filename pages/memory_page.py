@@ -37,6 +37,7 @@ from app.memory_info import (
 from app.themes import WIN10_CHART_COLORS
 from widgets.live_chart import LiveChart
 from widgets.row_hover import enable_row_hover
+from widgets.table_menu import install_table_menu
 
 _CHART_POINTS = 60
 _CHART_MIN_HEIGHT = 160
@@ -95,6 +96,7 @@ class MemoryPage(QWidget):
         self.data_table.horizontalHeader().setStretchLastSection(True)
         self.data_table.verticalHeader().setVisible(False)
         self.data_table.setColumnWidth(0, 280)
+        install_table_menu(self.data_table)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)

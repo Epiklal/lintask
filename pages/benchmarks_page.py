@@ -29,6 +29,7 @@ from app.i18n import N_, format_decimal, tr
 from app.system_info import StoppableWorker, WorkerStopped, list_physical_disks
 from app.remote_client import RemoteBenchmarkWorker
 from widgets.row_hover import enable_row_hover
+from widgets.table_menu import install_table_menu
 
 _BENCHMARKS = {
     "cpu": (N_("CPU"), "sysbench"),
@@ -155,35 +156,40 @@ class BenchmarksPage(QWidget):
         self._remote_config = None
 
         self.checkboxes = {}
+        # Two rows (tests, then options) so the page fits a narrow window.
         controls = QHBoxLayout()
         for key, (label, _) in _BENCHMARKS.items():
             checkbox = QCheckBox(tr(label))
             checkbox.setChecked(True)
             self.checkboxes[key] = checkbox
             controls.addWidget(checkbox)
+        controls.addStretch(1)
+        options = QHBoxLayout()
         self.cpu_threads = QSpinBox()
         self.cpu_threads.setRange(1, os.cpu_count() or 1)
         self.cpu_threads.setValue(os.cpu_count() or 1)
         self.cpu_threads.setSuffix(tr(" CPU threads"))
-        controls.addWidget(self.cpu_threads)
+        options.addWidget(self.cpu_threads)
         self.cpu_seconds = QSpinBox()
         self.cpu_seconds.setRange(5, 300)
         self.cpu_seconds.setValue(30)
         self.cpu_seconds.setSuffix(tr(" s CPU test"))
-        controls.addWidget(self.cpu_seconds)
+        options.addWidget(self.cpu_seconds)
         self.cpu_max_prime = QSpinBox()
         self.cpu_max_prime.setRange(10_000, 10_000_000)
         self.cpu_max_prime.setSingleStep(100_000)
         self.cpu_max_prime.setValue(1_000_000)
         self.cpu_max_prime.setSuffix(tr(" prime limit"))
-        controls.addWidget(self.cpu_max_prime)
+        options.addWidget(self.cpu_max_prime)
         self.disk_target = QComboBox()
+        # Long mount paths would otherwise set the page's minimum width.
+        self.disk_target.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        self.disk_target.setMinimumContentsLength(20)
         self._populate_disk_targets()
-        controls.addWidget(self.disk_target)
-        controls.addStretch(1)
+        options.addWidget(self.disk_target, 1)
         self.start_button = QPushButton(tr("Start selected"))
         self.start_button.clicked.connect(self.start_selected)
-        controls.addWidget(self.start_button)
+        options.addWidget(self.start_button)
 
         self.status = QLabel(tr("Ready"))
         self.status.setObjectName("detailInfo")
@@ -196,9 +202,11 @@ class BenchmarksPage(QWidget):
         self.results.horizontalHeader().setSectionResizeMode(2, QHeaderView.Stretch)
         self.results.setColumnWidth(0, 180)
         self.results.setColumnWidth(1, 200)
+        install_table_menu(self.results, (self.start_button,))
 
         layout = QVBoxLayout(self)
         layout.addLayout(controls)
+        layout.addLayout(options)
         layout.addWidget(self.status)
         layout.addWidget(self.results)
 

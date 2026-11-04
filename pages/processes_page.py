@@ -41,6 +41,7 @@ from app.memory_info import MIB, PageOutResult, PageOutWorker, format_bytes, is_
 from app.system_info import ProcessRow, ProcessWorker, kill_process
 from widgets.resizable_table import ResizableRowsTableView
 from widgets.row_hover import RowHoverDelegate
+from widgets.table_menu import add_copy_actions, selected_rows
 
 # Column order follows the Windows 10 "Processes" tab; PID/User/Threads come last.
 COLUMNS = [N_("Name"), N_("Status"), N_("CPU"), N_("RAM"), N_("Swap"), N_("GPU"), N_("GPU memory"),
@@ -727,6 +728,8 @@ class ProcessesPage(QWidget):
             action.setEnabled(False)
             action.setToolTip(reason)
         action.triggered.connect(lambda: self._move_to_swap(rows))
+        menu.addSeparator()
+        add_copy_actions(menu, self.table, selected_rows(self.table) or [index.row()])
         menu.exec(self.table.viewport().mapToGlobal(position))
 
     def _swap_block_reason(self, rows: list[ProcessRow]) -> str:

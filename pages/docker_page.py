@@ -24,6 +24,7 @@ from app.i18n import N_, tr
 from app.settings import Settings
 from app.system_info import DockerContainerRow, DockerWorker, docker_container_action
 from widgets.resizable_table import ResizableRowsTableView
+from widgets.table_menu import install_table_menu
 
 COLUMNS = ["★", N_("Name"), N_("Image"), N_("Status"), N_("CPU %"), N_("Memory (MB)"), N_("Limit (MB)"),
            N_("Memory %"), N_("GPU %"), N_("VRAM (MB)")]
@@ -199,6 +200,10 @@ class DockerPage(QWidget):
         layout.addLayout(top_bar)
         layout.addWidget(self.info_label)
         layout.addWidget(self.table)
+        install_table_menu(self.table, (
+            self.start_btn, self.stop_btn, self.restart_btn, None,
+            self.favorite_btn, self.icon_btn, self.rename_btn, None, self.remove_btn,
+        ))
 
         self._interval = 2.0
         self.worker: DockerWorker | None = None

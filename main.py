@@ -38,8 +38,11 @@ def main() -> int:
         print(tr("Installed from Git: run ./install.sh again. "
                  "Installed as a package: reinstall the package."), file=sys.stderr)
         return 1
+    from app import ui_scale
     from app.main_window import MainWindow
+    from app.settings import Settings
 
+    ui_scale.apply(Settings().ui_scale)
     app = QApplication(sys.argv)
     app.setApplicationName("Lintask")
     # Matches lintask.desktop so the panel shows the right icon/name.

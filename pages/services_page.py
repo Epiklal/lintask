@@ -21,6 +21,7 @@ from PySide6.QtWidgets import (
 from app.i18n import N_, tr
 from app.system_info import StoppableWorker, WorkerStopped
 from widgets.row_hover import enable_row_hover
+from widgets.table_menu import install_table_menu
 
 COLUMNS = [N_("Name"), N_("Description"), N_("Status")]
 
@@ -92,6 +93,7 @@ class ServicesPage(QWidget):
         # Unit names like "systemd-journald.service" need room; the description stretches.
         self.table.setColumnWidth(0, 300)
         self.table.setColumnWidth(2, 130)
+        install_table_menu(self.table, (self.refresh_btn,))
         self.table.verticalHeader().setVisible(False)
 
         layout = QVBoxLayout(self)

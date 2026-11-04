@@ -137,6 +137,23 @@ class Settings:
         self._store.setValue("default_page", value)
 
     @property
+    def ui_scale(self) -> int:
+        """UI size in percent; 0 follows the screen resolution (see app/ui_scale.py)."""
+        return self._store.value("ui_scale", 0, type=int)
+
+    @ui_scale.setter
+    def ui_scale(self, value: int) -> None:
+        self._store.setValue("ui_scale", value)
+
+    @property
+    def window_geometry(self):
+        return self._store.value("window_geometry")
+
+    @window_geometry.setter
+    def window_geometry(self, value) -> None:
+        self._store.setValue("window_geometry", value)
+
+    @property
     def cpu_per_core(self) -> bool:
         """CPU chart shows one graph per logical processor instead of the overall one."""
         return self._store.value("cpu_per_core", False, type=bool)

@@ -1,6 +1,7 @@
 """Performance tab - Windows 10 style: sidebar tiles + large detail chart."""
 from __future__ import annotations
 
+import html
 import math
 import re
 from collections import deque
@@ -8,6 +9,7 @@ from collections import deque
 import psutil
 from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtWidgets import (
+    QApplication,
     QFrame,
     QGridLayout,
     QHBoxLayout,
@@ -558,6 +560,10 @@ class PerformancePage(QWidget):
         if self._selected != "cpu":
             return
         menu = QMenu(self)
+        self._add_cpu_graph_menu(menu)
+        menu.exec(global_pos)
+
+    def _add_cpu_graph_menu(self, menu: QMenu) -> None:
         change_menu = menu.addMenu(tr("Change graph to"))
         for label, per_core in ((N_("Overall utilization"), False),
                                 (N_("Logical processors"), True)):
@@ -567,7 +573,6 @@ class PerformancePage(QWidget):
             action.triggered.connect(
                 lambda _checked=False, p=per_core: self.core_toggle_btn.setChecked(p)
             )
-        menu.exec(global_pos)
 
     def _rebuild_core_charts(self, count: int) -> None:
         while self._cores_grid.count():
@@ -593,6 +598,33 @@ class PerformancePage(QWidget):
 
     def _connect_tile(self, key: str, tile: ResourceTile) -> None:
         tile.mousePressEvent = lambda _e, k=key: self._select(k)
+        tile.setContextMenuPolicy(Qt.CustomContextMenu)
+        tile.customContextMenuRequested.connect(
+            lambda pos, k=key, t=tile: self._show_tile_menu(k, t.mapToGlobal(pos))
+        )
+
+    def tile_text(self, key: str) -> str:
+        """Plain text of a tile and its details, for the clipboard."""
+        tile = self.tiles[key]
+        lines = [self._labels[key]]
+        lines += [label.text() for label in (tile.detail_label, tile.value_label)
+                  if label.text()]
+        stats = re.sub(r"<br\s*/?>", "\n", self._last_text.get(key, ""))
+        stats = html.unescape(re.sub(r"<[^>]+>", "", stats)).strip()
+        if stats:
+            lines += ["", stats]
+        return "\n".join(lines)
+
+    def _show_tile_menu(self, key: str, global_pos) -> None:
+        """Right-click on a tile on the left: select it and offer what fits it."""
+        self._select(key)
+        menu = QMenu(self)
+        if key == "cpu":
+            self._add_cpu_graph_menu(menu)
+            menu.addSeparator()
+        copy = menu.addAction(tr("Copy"))
+        copy.triggered.connect(lambda: QApplication.clipboard().setText(self.tile_text(key)))
+        menu.exec(global_pos)
 
     def _add_gpu_histories(self) -> None:
         self._gpu_histories.append({

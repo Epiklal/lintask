@@ -15,6 +15,7 @@ from PySide6.QtWidgets import (
 from app.i18n import format_decimal, tr
 from app.system_info import list_hardware_sensors
 from widgets.row_hover import enable_row_hover
+from widgets.table_menu import install_table_menu
 
 
 class SensorsPage(QWidget):
@@ -23,12 +24,12 @@ class SensorsPage(QWidget):
 
         self.summary = QLabel("")
         self.summary.setObjectName("detailInfo")
-        refresh_button = QPushButton(tr("Refresh"))
-        refresh_button.clicked.connect(self.refresh)
+        self.refresh_button = QPushButton(tr("Refresh"))
+        self.refresh_button.clicked.connect(self.refresh)
         top = QHBoxLayout()
         top.addWidget(self.summary)
         top.addStretch(1)
-        top.addWidget(refresh_button)
+        top.addWidget(self.refresh_button)
 
         self.table = QTableWidget(0, 5)
         enable_row_hover(self.table)
@@ -45,6 +46,7 @@ class SensorsPage(QWidget):
         self.table.setColumnWidth(1, 240)
         self.table.setColumnWidth(2, 100)
         self.table.setColumnWidth(3, 70)
+        install_table_menu(self.table, (self.refresh_button,))
 
         layout = QVBoxLayout(self)
         layout.addLayout(top)

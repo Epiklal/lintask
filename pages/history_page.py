@@ -4,13 +4,15 @@ from __future__ import annotations
 import http.client
 import sqlite3
 
-from PySide6.QtCore import QThread, QTimer, Signal
+from PySide6.QtCore import QThread, QTimer, Qt, Signal
 from PySide6.QtWidgets import (
+    QApplication,
     QCheckBox,
     QComboBox,
     QFrame,
     QHBoxLayout,
     QLabel,
+    QMenu,
     QMessageBox,
     QPushButton,
     QScrollArea,
@@ -175,6 +177,8 @@ class HistoryPage(QWidget):
         for title, formatter, fixed_max, specs in CHARTS:
             chart = HistoryChart(tr(title), formatter, fixed_max)
             chart.hide()
+            chart.setContextMenuPolicy(Qt.CustomContextMenu)
+            chart.customContextMenuRequested.connect(self._show_chart_menu)
             charts_layout.addWidget(chart)
             self.charts.append((chart, specs))
         charts_layout.addStretch(1)
@@ -183,6 +187,25 @@ class HistoryPage(QWidget):
         scroll.setFrameShape(QFrame.NoFrame)
         scroll.setWidget(content)
         layout.addWidget(scroll, 1)
+
+    def _show_chart_menu(self, position) -> None:
+        # The sender instead of a lambda per chart, for the same reason as above.
+        chart = self.sender()
+        menu = QMenu(self)
+        period_menu = menu.addMenu(tr("Period"))
+        for index in range(self.range_combo.count()):
+            action = period_menu.addAction(self.range_combo.itemText(index))
+            action.setCheckable(True)
+            action.setChecked(index == self.range_combo.currentIndex())
+            action.triggered.connect(
+                lambda _checked=False, i=index: self.range_combo.setCurrentIndex(i))
+        menu.addAction(tr("Reload"), self.reload)
+        copy = menu.addAction(tr("Copy graph as image"))
+        copy.triggered.connect(lambda: QApplication.clipboard().setPixmap(chart.grab()))
+        menu.addSeparator()
+        delete = menu.addAction(self.clear_btn.text(), self.clear_btn.click)
+        delete.setEnabled(self.clear_btn.isEnabled())
+        menu.exec(chart.mapToGlobal(position))
 
     def set_theme(self, dark: bool, chart_background=None, chart_colors=None) -> None:
         for chart, _specs in self.charts:

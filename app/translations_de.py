@@ -405,4 +405,11 @@ GERMAN = {
     "Change graph to": "Diagramm ändern in",
     "Overall utilization": "Gesamtauslastung",
     "Open file location": "Dateispeicherort öffnen",
+    "Copy all": "Alles kopieren",
+    "Period": "Zeitraum",
+    "Reload": "Neu laden",
+    "Copy graph as image": "Diagramm als Bild kopieren",
+    "Automatic (screen resolution)": "Automatisch (Bildschirmauflösung)",
+    "Takes effect after Lintask is restarted.": "Wirkt nach einem Neustart von Lintask.",
+    "UI size:": "Oberflächengröße:",
 }

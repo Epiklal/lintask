@@ -20,6 +20,7 @@ from app.system_info import (
     AutostartEntry, StoppableWorker, list_autostart_entries, set_autostart_enabled,
 )
 from widgets.resizable_table import ResizableRowsTableWidget
+from widgets.table_menu import install_table_menu
 
 COLUMNS = [N_("Name"), N_("Command"), N_("Source"), N_("Status")]
 # The third key is what older, German-only servers send.
@@ -82,6 +83,7 @@ class AutostartPage(QWidget):
         layout = QVBoxLayout(self)
         layout.addLayout(top_bar)
         layout.addWidget(self.table)
+        install_table_menu(self.table, (self.toggle_btn, None, self.refresh_btn))
 
         self._all_entries: list[AutostartEntry] = []
         self.worker: AutostartListWorker | None = None

@@ -15,6 +15,7 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QMenuBar,
     QPushButton,
+    QScrollArea,
     QStatusBar,
     QVBoxLayout,
     QWidget,
@@ -617,6 +618,10 @@ _NAV_ICONS = ["processes", "performance", "history", "sensors", "services", "doc
               "autostart", "benchmarks", "settings"]
 
 
+_DEFAULT_WIDTH, _DEFAULT_HEIGHT = 1000, 700
+_MIN_WIDTH, _MIN_HEIGHT = 480, 320
+
+
 class PageFrame(QWidget):
     """Wraps a page with the Windows 11 page header: a title and command buttons.
     In the Windows 10 style the header is hidden and the page looks unchanged."""
@@ -640,7 +645,15 @@ class PageFrame(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
         layout.addWidget(self.header)
-        layout.addWidget(page, 1)
+        # A page larger than the window scrolls instead of forcing the whole window
+        # to its size; otherwise the window could not be made smaller than the
+        # largest page (the settings page alone is ~1000 px high).
+        self.scroll = QScrollArea()
+        self.scroll.setObjectName("pageScroll")
+        self.scroll.setWidgetResizable(True)
+        self.scroll.setFrameShape(QScrollArea.NoFrame)
+        self.scroll.setWidget(page)
+        layout.addWidget(self.scroll, 1)
         self.header.setVisible(False)
 
 
@@ -809,7 +822,7 @@ class MainWindow(QMainWindow):
     def __init__(self):
         QApplication.setStyle("Fusion")
         super().__init__()
-        self.resize(1000, 700)
+        self.setMinimumSize(_MIN_WIDTH, _MIN_HEIGHT)
 
         self.settings = Settings()
         set_language(self.settings.language)
@@ -817,6 +830,7 @@ class MainWindow(QMainWindow):
         self.history = HistoryService(recording=self.settings.history_enabled)
 
         self._build_ui()
+        self._restore_size()
         self.tabs.setCurrentWidget(self._frame_for(self.settings.default_page))
         if self.settings.always_on_top:
             window_on_top.set_always_on_top(self, True)
@@ -873,7 +887,8 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(self.tabs)
 
         self.status_label = QLabel()
-        self.statusBar().setSizeGripEnabled(False)
+        # Windows' size grip, bottom right: an easy target for resizing.
+        self.statusBar().setSizeGripEnabled(True)
         self.statusBar().addWidget(self.status_label, stretch=1)
         # Windows 10 keeps "End task" in the footer, bottom right.
         self.statusBar().addPermanentWidget(self.processes_page.end_task_btn)
@@ -1079,7 +1094,23 @@ class MainWindow(QMainWindow):
                processes=process_count, threads=thread_count)
         )
 
+    def _restore_size(self) -> None:
+        """Last size from the previous run, otherwise 1000x700 (the Windows default)
+        shrunk to fit the screen. Both are in scaled units, so they cover the same
+        share of a 720p as of an 8K screen."""
+        geometry = self.settings.window_geometry
+        if geometry is not None and self.restoreGeometry(geometry):
+            return
+        width, height = _DEFAULT_WIDTH, _DEFAULT_HEIGHT
+        screen = self.screen() or QApplication.primaryScreen()
+        if screen is not None:
+            available = screen.availableGeometry()
+            width = min(width, int(available.width() * 0.9))
+            height = min(height, int(available.height() * 0.9))
+        self.resize(max(width, _MIN_WIDTH), max(height, _MIN_HEIGHT))
+
     def closeEvent(self, event) -> None:  # noqa: N802 (Qt override)
+        self.settings.window_geometry = self.saveGeometry()
         self._shut_down_pages()
         window_on_top.release()
         self.history.shutdown()

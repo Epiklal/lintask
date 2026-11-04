@@ -26,6 +26,7 @@ from PySide6.QtWidgets import (
 
 from app.hardware_setup import setup_script, terminal_command
 from app.i18n import N_, tr
+from app import ui_scale
 from app.settings import Settings
 from app.themes import SCHEMES
 
@@ -118,10 +119,22 @@ class SettingsPage(QWidget):
         self.language_combo.setCurrentIndex(self.language_combo.findData(settings.language))
         self.language_combo.currentIndexChanged.connect(self._on_language_changed)
 
+        self.ui_scale_combo = QComboBox()
+        for percent in ui_scale.CHOICES:
+            label = tr("Automatic (screen resolution)") if percent == 0 else f"{percent} %"
+            self.ui_scale_combo.addItem(label, percent)
+        self.ui_scale_combo.setCurrentIndex(max(0, self.ui_scale_combo.findData(settings.ui_scale)))
+        self.ui_scale_combo.currentIndexChanged.connect(self._on_ui_scale_changed)
+        self.ui_scale_hint = QLabel(tr("Takes effect after Lintask is restarted."))
+        self.ui_scale_hint.setObjectName("detailInfo")
+        self.ui_scale_hint.setVisible(False)
+
         appearance_form = QFormLayout(appearance_box)
         appearance_form.addRow(tr("Language:"), self.language_combo)
         appearance_form.addRow(tr("Style:"), self.style_combo)
         appearance_form.addRow(tr("Color scheme:"), self.theme_combo)
+        appearance_form.addRow(tr("UI size:"), self.ui_scale_combo)
+        appearance_form.addRow("", self.ui_scale_hint)
 
         # Windows 11 Task Manager: "Default start page" and "Window management".
         window_box = QGroupBox(tr("Window management"))
@@ -237,6 +250,10 @@ class SettingsPage(QWidget):
         language = self.language_combo.itemData(index)
         self.settings.language = language
         self.languageChanged.emit(language)
+
+    def _on_ui_scale_changed(self, index: int) -> None:
+        self.settings.ui_scale = self.ui_scale_combo.itemData(index)
+        self.ui_scale_hint.setVisible(True)
 
     def set_start_pages(self, pages: list[tuple[str, str]]) -> None:
         """Fills the start page choice with (key, title) pairs, in tab order."""
