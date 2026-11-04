@@ -13,7 +13,7 @@ APP_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$APP_DIR"
 
 PKG=lintask
-BASE_VERSION=1.1.2
+BASE_VERSION=1.1.3
 STAGE=build/rpm
 OUT_DIR=dist
 

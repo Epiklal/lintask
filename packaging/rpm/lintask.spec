@@ -5,7 +5,7 @@
 #     sudo zypper install ./dist/lintask-*.noarch.rpm   (openSUSE)
 # PySide6 and psutil come as system packages, so no venv is needed.
 
-%{!?pkg_version: %global pkg_version 1.1.2}
+%{!?pkg_version: %global pkg_version 1.1.3}
 
 Name:           lintask
 Version:        %{pkg_version}
@@ -120,5 +120,8 @@ fi
 %config(noreplace) %attr(600,root,root) %{_sysconfdir}/default/%{name}-server
 
 %changelog
+* Wed Nov 04 2026 Epiklal <https://github.com/Epiklal> - 1.1.3-1
+- RPM, AppImage, tarball and snap packages built and tested in CI.
+
 * Wed Nov 04 2026 Epiklal <https://github.com/Epiklal> - 1.1.2-1
 - RPM package next to the .deb and the Arch package.

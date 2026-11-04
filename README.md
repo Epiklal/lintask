@@ -320,7 +320,7 @@ sudo apt install ./dist/lintask_*.deb
 
 `build-deb.sh` only needs `dpkg-deb` (package `dpkg`, part of every Debian-based
 system); no `debhelper`, no `venv`, no `pip`. It prints the name of the finished file,
-e.g. `dist/lintask_1.1.2+20261104.1200.gac3cc53_all.deb` (the version contains
+e.g. `dist/lintask_1.1.3+20261104.1200.gd8b7490_all.deb` (the version contains
 the build time and the Git commit; pass your own with `./build-deb.sh 1.2.3`). If
 `dist/` already holds older builds, install the file the script printed instead of
 using the `*` wildcard.
@@ -1293,8 +1293,8 @@ When all of them pass, the release job publishes a GitHub Release with every
 package and a `SHA256SUMS` file attached:
 
 ```bash
-git tag v1.1.2
-git push origin v1.1.2
+git tag v1.1.3
+git push origin v1.1.3
 ```
 
 Every push to `main` and every manual run (**Actions** tab → *Build packages* →
