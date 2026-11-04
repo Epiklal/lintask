@@ -136,8 +136,21 @@ def _cpu_socket_lines(temps: list, watts: list) -> str:
 
 
 def _core_grid_columns(count: int) -> int:
-    """8 columns like Windows, wider for servers so 128+ threads don't stack into a tower."""
-    return max(1, min(count, max(8, math.ceil(math.sqrt(count * 2)))))
+    """Columns for the per-core grid, laid out like Windows: a full rectangle
+    (12 -> 4x3, 8 -> 4x2, 32 -> 8x4) whose cells are a little wider than tall
+    in the 16:9 chart area. Empty slots are only accepted when they buy a much
+    better shape, e.g. for prime counts or hundreds of threads.
+    """
+    if count <= 1:
+        return 1
+
+    def score(columns: int) -> float:
+        rows = math.ceil(count / columns)
+        cell_aspect = (16 / 9) * rows / columns
+        empty = rows * columns - count
+        return abs(math.log(cell_aspect / 1.4)) + 5 * empty / (rows * columns)
+
+    return min(range(1, count + 1), key=score)
 
 
 class GpuGraphSlot(QWidget):

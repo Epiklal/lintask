@@ -147,10 +147,12 @@ class TestCpuDisplay(unittest.TestCase):
         self.assertIn(tr("CPU {number}", number=2), keys)
 
     def test_core_grid_columns(self):
-        self.assertEqual(_core_grid_columns(4), 4)
-        self.assertEqual(_core_grid_columns(32), 8)
-        self.assertEqual(_core_grid_columns(64), 12)
-        self.assertEqual(_core_grid_columns(256), 23)
+        # Full rectangles like Windows: threads -> columns x rows.
+        for threads, columns in ((1, 1), (2, 2), (4, 2), (6, 3), (8, 4), (12, 4),
+                                 (16, 4), (24, 6), (32, 8), (64, 8), (256, 16)):
+            with self.subTest(threads=threads):
+                self.assertEqual(_core_grid_columns(threads), columns)
+                self.assertEqual(threads % columns, 0)
 
 
 if __name__ == "__main__":
