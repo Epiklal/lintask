@@ -120,6 +120,32 @@ class Settings:
         self._store.setValue("history_enabled", value)
 
     @property
+    def always_on_top(self) -> bool:
+        return self._store.value("always_on_top", False, type=bool)
+
+    @always_on_top.setter
+    def always_on_top(self, value: bool) -> None:
+        self._store.setValue("always_on_top", value)
+
+    @property
+    def default_page(self) -> str:
+        """Key of the page shown at start, like Windows' "Set default tab"."""
+        return self._store.value("default_page", "processes", type=str)
+
+    @default_page.setter
+    def default_page(self, value: str) -> None:
+        self._store.setValue("default_page", value)
+
+    @property
+    def cpu_per_core(self) -> bool:
+        """CPU chart shows one graph per logical processor instead of the overall one."""
+        return self._store.value("cpu_per_core", False, type=bool)
+
+    @cpu_per_core.setter
+    def cpu_per_core(self, value: bool) -> None:
+        self._store.setValue("cpu_per_core", value)
+
+    @property
     def remote_enabled(self) -> bool:
         return self._store.value("remote_enabled", False, type=bool)
 

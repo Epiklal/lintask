@@ -23,6 +23,7 @@ from PySide6.QtWidgets import (
 from app.history import HistoryService
 from app.i18n import set_language, tr
 from app.settings import Settings
+from app import window_on_top
 from pages.autostart_page import AutostartPage
 from pages.benchmarks_page import BenchmarksPage
 from pages.docker_page import DockerPage
@@ -811,12 +812,14 @@ class MainWindow(QMainWindow):
         self.resize(1000, 700)
 
         self.settings = Settings()
-        self._always_on_top = False
         set_language(self.settings.language)
         # Outside _build_ui: recording goes on while a language change rebuilds the pages.
         self.history = HistoryService(recording=self.settings.history_enabled)
 
         self._build_ui()
+        self.tabs.setCurrentWidget(self._frame_for(self.settings.default_page))
+        if self.settings.always_on_top:
+            window_on_top.set_always_on_top(self, True)
 
     def _build_ui(self) -> None:
         """Creates everything that shows text; runs again when the language changes."""
@@ -828,7 +831,8 @@ class MainWindow(QMainWindow):
         # Shown inside the performance page, when its memory tile is selected.
         self.memory_page = MemoryPage(self.settings)
         self.performance_page = PerformancePage(
-            self.settings.smart_sudo_enabled, memory_view=self.memory_page
+            self.settings.smart_sudo_enabled, memory_view=self.memory_page,
+            settings=self.settings,
         )
         self.history_page = HistoryPage(self.settings, self.history)
         self.sensors_page = SensorsPage()
@@ -844,22 +848,26 @@ class MainWindow(QMainWindow):
         performance_new_task = QPushButton(tr("Run new task"))
         performance_new_task.clicked.connect(self.processes_page.run_new_task)
         pages = [
-            (self.processes_page, tr("Processes"),
+            ("processes", self.processes_page, tr("Processes"),
              [processes_new_task, self.processes_page.header_end_task_btn]),
-            (self.performance_page, tr("Performance"), [performance_new_task]),
-            (self.history_page, tr("History"), None),
-            (self.sensors_page, tr("Sensors"), None),
-            (self.services_page, tr("Services"), None),
-            (self.docker_page, "Docker", None),
-            (self.autostart_page, tr("Autostart"), None),
-            (self.benchmarks_page, tr("Benchmarks"), None),
-            (self.settings_page, tr("Settings"), None),
+            ("performance", self.performance_page, tr("Performance"), [performance_new_task]),
+            ("history", self.history_page, tr("History"), None),
+            ("sensors", self.sensors_page, tr("Sensors"), None),
+            ("services", self.services_page, tr("Services"), None),
+            ("docker", self.docker_page, "Docker", None),
+            ("autostart", self.autostart_page, tr("Autostart"), None),
+            ("benchmarks", self.benchmarks_page, tr("Benchmarks"), None),
+            ("settings", self.settings_page, tr("Settings"), None),
         ]
         self.page_frames: list[PageFrame] = []
-        for page, title, actions in pages:
+        self._page_titles: dict[str, str] = {}
+        for key, page, title, actions in pages:
             frame = PageFrame(title, page, actions)
+            frame.page_key = key
             self.page_frames.append(frame)
+            self._page_titles[key] = title
             self.tabs.addTab(frame, title)
+        self.settings_page.set_start_pages(list(self._page_titles.items()))
         self.tabs.nav_bar.icon_kinds = _NAV_ICONS
 
         self.setCentralWidget(self.tabs)
@@ -888,6 +896,8 @@ class MainWindow(QMainWindow):
             self.performance_page.set_smart_sudo_enabled
         )
         self.settings_page.customQssChanged.connect(self._apply_custom_qss)
+        self.settings_page.alwaysOnTopChanged.connect(self._set_always_on_top)
+        self.settings_page.defaultPageChanged.connect(self._sync_default_page_actions)
         self.settings_page.remoteConnectionChanged.connect(
             self.performance_page.set_remote_connection
         )
@@ -943,10 +953,21 @@ class MainWindow(QMainWindow):
         file_menu.addAction(tr("E&xit"), self.close)
 
         options_menu = menu_bar.addMenu(tr("&Options"))
-        on_top = options_menu.addAction(tr("&Always on top"))
-        on_top.setCheckable(True)
-        on_top.setChecked(self._always_on_top)
-        on_top.toggled.connect(self._set_always_on_top)
+        self._on_top_action = options_menu.addAction(tr("&Always on top"))
+        self._on_top_action.setCheckable(True)
+        self._on_top_action.setChecked(self.settings.always_on_top)
+        self._on_top_action.toggled.connect(self._set_always_on_top)
+        options_menu.addSeparator()
+        default_menu = options_menu.addMenu(tr("Set &default tab"))
+        self._default_page_actions: dict[str, QAction] = {}
+        default_group = QActionGroup(default_menu)
+        for key, title in self._page_titles.items():
+            action = default_menu.addAction(title)
+            action.setCheckable(True)
+            action.setChecked(self.settings.default_page == key)
+            action.triggered.connect(lambda _checked=False, k=key: self._choose_default_page(k))
+            default_group.addAction(action)
+            self._default_page_actions[key] = action
 
         view_menu = menu_bar.addMenu(tr("&View"))
         style_menu = view_menu.addMenu(tr("&Style"))
@@ -985,9 +1006,28 @@ class MainWindow(QMainWindow):
             action.setChecked(True)
 
     def _set_always_on_top(self, enabled: bool) -> None:
-        self._always_on_top = enabled
-        self.setWindowFlag(Qt.WindowStaysOnTopHint, enabled)
-        self.show()
+        """Shared by the Options menu and the settings page; keeps both in step."""
+        self.settings.always_on_top = enabled
+        for widget in (self._on_top_action, self.settings_page.always_on_top_check):
+            widget.blockSignals(True)
+            widget.setChecked(enabled)
+            widget.blockSignals(False)
+        window_on_top.set_always_on_top(self, enabled)
+
+    def _choose_default_page(self, key: str) -> None:
+        combo = self.settings_page.default_page_combo
+        combo.setCurrentIndex(combo.findData(key))
+
+    def _sync_default_page_actions(self, key: str) -> None:
+        action = self._default_page_actions.get(key)
+        if action is not None:
+            action.setChecked(True)
+
+    def _frame_for(self, key: str) -> "PageFrame":
+        for frame in self.page_frames:
+            if frame.page_key == key:
+                return frame
+        return self.page_frames[0]
 
     def _on_tab_changed(self, index: int) -> None:
         self.processes_page.end_task_btn.setVisible(index == 0)
@@ -1041,6 +1081,7 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event) -> None:  # noqa: N802 (Qt override)
         self._shut_down_pages()
+        window_on_top.release()
         self.history.shutdown()
         super().closeEvent(event)
 

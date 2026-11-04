@@ -398,4 +398,11 @@ GERMAN = {
     "Lintask cannot move itself to swap.": "Lintask kann sich nicht selbst auslagern.",
     "The desktop needs this program, so it cannot be moved to swap.": "Der Desktop braucht dieses Programm, deshalb kann es nicht ausgelagert werden.",
     "Another program is being moved to swap right now.": "Gerade wird schon ein anderes Programm ausgelagert.",
+    "Window management": "Fensterverwaltung",
+    "Always on top": "Immer im Vordergrund",
+    "Default start page:": "Standardstartseite:",
+    "Set &default tab": "&Standardregisterkarte festlegen",
+    "Change graph to": "Diagramm ändern in",
+    "Overall utilization": "Gesamtauslastung",
+    "Open file location": "Dateispeicherort öffnen",
 }

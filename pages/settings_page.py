@@ -90,6 +90,8 @@ class SettingsPage(QWidget):
     smartSudoEnabled = Signal(bool)
     customQssChanged = Signal(str)
     remoteConnectionChanged = Signal(bool, str, int, str)
+    alwaysOnTopChanged = Signal(bool)
+    defaultPageChanged = Signal(str)
 
     def __init__(self, settings: Settings, parent=None):
         super().__init__(parent)
@@ -120,6 +122,17 @@ class SettingsPage(QWidget):
         appearance_form.addRow(tr("Language:"), self.language_combo)
         appearance_form.addRow(tr("Style:"), self.style_combo)
         appearance_form.addRow(tr("Color scheme:"), self.theme_combo)
+
+        # Windows 11 Task Manager: "Default start page" and "Window management".
+        window_box = QGroupBox(tr("Window management"))
+        self.default_page_combo = QComboBox()
+        self.default_page_combo.currentIndexChanged.connect(self._on_default_page_changed)
+        self.always_on_top_check = QCheckBox(tr("Always on top"))
+        self.always_on_top_check.setChecked(settings.always_on_top)
+        self.always_on_top_check.toggled.connect(self._on_always_on_top_toggled)
+        window_form = QFormLayout(window_box)
+        window_form.addRow(tr("Default start page:"), self.default_page_combo)
+        window_form.addRow(self.always_on_top_check)
 
         speed_box = QGroupBox(tr("Refresh rate"))
         self.process_spin = QSpinBox()
@@ -202,6 +215,7 @@ class SettingsPage(QWidget):
 
         layout = QVBoxLayout(self)
         layout.addWidget(appearance_box)
+        layout.addWidget(window_box)
         layout.addWidget(speed_box)
         layout.addWidget(remote_box)
         layout.addWidget(smart_box)
@@ -223,6 +237,26 @@ class SettingsPage(QWidget):
         language = self.language_combo.itemData(index)
         self.settings.language = language
         self.languageChanged.emit(language)
+
+    def set_start_pages(self, pages: list[tuple[str, str]]) -> None:
+        """Fills the start page choice with (key, title) pairs, in tab order."""
+        combo = self.default_page_combo
+        combo.blockSignals(True)
+        combo.clear()
+        for key, title in pages:
+            combo.addItem(title, key)
+        combo.setCurrentIndex(max(0, combo.findData(self.settings.default_page)))
+        combo.blockSignals(False)
+
+    def _on_default_page_changed(self, index: int) -> None:
+        key = self.default_page_combo.itemData(index)
+        if key:
+            self.settings.default_page = key
+            self.defaultPageChanged.emit(key)
+
+    def _on_always_on_top_toggled(self, enabled: bool) -> None:
+        self.settings.always_on_top = enabled
+        self.alwaysOnTopChanged.emit(enabled)
 
     def _on_process_interval_changed(self, value: int) -> None:
         self.settings.process_interval_ms = value

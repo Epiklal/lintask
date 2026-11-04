@@ -319,10 +319,11 @@ class StatsPanel(QWidget):
 class PerformancePage(QWidget):
     remoteSnapshotReady = Signal(object)
     def __init__(self, smart_sudo_enabled: bool = False, memory_view: QWidget | None = None,
-                 parent=None):
+                 settings=None, parent=None):
         super().__init__(parent)
 
         self._memory_view = memory_view
+        self._settings = settings
         self._dark = False
         self._chart_bg: str | None = None
         self._chart_colors: dict[str, str] = dict(WIN10_CHART_COLORS)
@@ -437,6 +438,11 @@ class PerformancePage(QWidget):
         self.chart_stack = QStackedLayout()
         self.chart_stack.addWidget(self.detail_chart)
         self.chart_stack.addWidget(self.cores_widget)
+        for widget in (self.detail_chart, self.cores_widget):
+            widget.setContextMenuPolicy(Qt.CustomContextMenu)
+            widget.customContextMenuRequested.connect(
+                lambda pos, w=widget: self._show_cpu_context_menu(w.mapToGlobal(pos))
+            )
 
         self._gpu_metric_order: list[str] = [
             N_("Utilization"), *GPU_ENGINE_METRICS, N_("PCIe receive"), N_("PCIe send"),
@@ -537,10 +543,31 @@ class PerformancePage(QWidget):
         self.timer.start(500)
         self._tick()
         self.core_toggle_btn.setVisible(True)
+        if settings is not None and settings.cpu_per_core:
+            self.core_toggle_btn.setChecked(True)
 
     def _on_core_toggle(self, checked: bool) -> None:
         self._show_per_core = checked
+        if self._settings is not None:
+            self._settings.cpu_per_core = checked
         self._update_chart_stack()
+
+    def _show_cpu_context_menu(self, global_pos) -> None:
+        """Right-click on the CPU graph, as in Windows: switch between one overall
+        graph and one graph per logical processor."""
+        if self._selected != "cpu":
+            return
+        menu = QMenu(self)
+        change_menu = menu.addMenu(tr("Change graph to"))
+        for label, per_core in ((N_("Overall utilization"), False),
+                                (N_("Logical processors"), True)):
+            action = change_menu.addAction(tr(label))
+            action.setCheckable(True)
+            action.setChecked(self._show_per_core == per_core)
+            action.triggered.connect(
+                lambda _checked=False, p=per_core: self.core_toggle_btn.setChecked(p)
+            )
+        menu.exec(global_pos)
 
     def _rebuild_core_charts(self, count: int) -> None:
         while self._cores_grid.count():

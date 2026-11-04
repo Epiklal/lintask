@@ -15,9 +15,10 @@ from PySide6.QtCore import (
     QRect,
     QSize,
     Qt,
+    QUrl,
     Signal,
 )
-from PySide6.QtGui import QColor, QFont, QIcon, QPainter, QPen
+from PySide6.QtGui import QColor, QDesktopServices, QFont, QIcon, QPainter, QPen
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -118,6 +119,14 @@ def _process_icon(name: str) -> QIcon:
             icon = QIcon.fromTheme("application-x-executable")
         _icon_cache[name] = icon
     return icon
+
+
+def _executable_folder(pid: int) -> str | None:
+    try:
+        exe = psutil.Process(pid).exe()
+    except (psutil.Error, OSError):
+        return None
+    return os.path.dirname(exe) if exe else None
 
 
 @dataclass
@@ -700,6 +709,18 @@ class ProcessesPage(QWidget):
             return
         menu = QMenu(self.table)
         menu.setToolTipsVisible(True)
+        end_action = menu.addAction(tr("End task"))
+        if self._remote_enabled:
+            end_action.setEnabled(False)
+            end_action.setToolTip(tr(_REMOTE_ACTION_HINT))
+        end_action.triggered.connect(self._end_selected_task)
+        location_action = menu.addAction(tr("Open file location"))
+        location = None if self._remote_enabled else _executable_folder(rows[0].pid)
+        location_action.setEnabled(location is not None)
+        location_action.triggered.connect(
+            lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(location))
+        )
+        menu.addSeparator()
         action = menu.addAction(tr("Move to swap"))
         reason = self._swap_block_reason(rows)
         if reason:
