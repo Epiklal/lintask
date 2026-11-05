@@ -104,6 +104,7 @@ GERMAN = {
     "Sockets": "Sockel",
     "Highest temperature": "Höchste Temperatur",
     "CCD {number}": "CCD {number}",
+    "Socket {socket} · CCD {number}": "Sockel {socket} · CCD {number}",
     "Cores power draw": "Leistungsaufnahme Kerne",
     "CPU {number}": "CPU {number}",
     "Power draw": "Leistungsaufnahme",

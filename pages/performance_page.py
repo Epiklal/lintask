@@ -65,6 +65,8 @@ _SIDE_KEYS = {N_("Cores"), N_("Logical processors"), N_("Adapter"), N_("IPv4 add
 _CPU_ROW_KEY = N_("CPU {number}")
 # The core chiplets of Ryzen, Threadripper and EPYC: "CCD 1", "CCD 2", …
 _CCD_ROW_KEY = N_("CCD {number}")
+# On boards with several CPUs the CCDs are counted per socket: "Socket 2 · CCD 3".
+_SOCKET_CCD_ROW_KEY = N_("Socket {socket} · CCD {number}")
 # Network graphs never scale below this (KBit/s), so idle noise doesn't fill the graph.
 _NET_SCALE_FLOOR_KBIT = 100.0
 _GPU_MAX_GRAPHS = 10
@@ -152,13 +154,58 @@ def _ccd_loads(groups: list, per_core: list) -> list[float]:
     return [max(0.0, min(_cpus_average(per_core, cpus) or 0.0, 100.0)) for cpus in groups]
 
 
+def _cpu_ranges(cpus: list) -> str:
+    """[0, 1, 2, 3, 8, 9] -> "0–3, 8–9"."""
+    ranges: list[list[int]] = []
+    for cpu in sorted(cpus):
+        if ranges and cpu == ranges[-1][1] + 1:
+            ranges[-1][1] = cpu
+        else:
+            ranges.append([cpu, cpu])
+    return ", ".join(str(a) if a == b else f"{a}–{b}" for a, b in ranges)
+
+
+def _ccd_of_cpus(groups: list) -> dict[int, int]:
+    """Logical CPU -> index of its CCD; empty on a CPU with a single CCD."""
+    if len(groups) < 2:
+        return {}
+    return {cpu: index for index, cpus in enumerate(groups) for cpu in cpus}
+
+
+def _core_blocks(count: int, groups: list) -> list[list[int]]:
+    """Logical CPUs in grid order, one block per CCD: all threads of CCD 1, then CCD 2
+    and so on; CPUs no CCD lists form a last block. Without CCDs: one block 0, 1, 2, ..."""
+    ccd_of = _ccd_of_cpus(groups)
+    blocks: dict[int, list[int]] = {}
+    for cpu in range(count):
+        blocks.setdefault(ccd_of.get(cpu, len(groups)), []).append(cpu)
+    return [blocks[key] for key in sorted(blocks)]
+
+
+def _ccd_socket(index: int, ccd_count: int, sockets: int) -> int | None:
+    """Socket (from 0) of the CCD at index; None on a single CPU. Linux numbers socket 0's
+    cores before socket 1's, so the CCDs sorted by first CPU are split evenly."""
+    if sockets < 2 or ccd_count < sockets or ccd_count % sockets:
+        return None
+    return index // (ccd_count // sockets)
+
+
+def _ccd_name(index: int, ccd_count: int, sockets: int = 1) -> str:
+    """"CCD 3", or "Socket 2 · CCD 3" with the CCDs counted per socket."""
+    socket = _ccd_socket(index, ccd_count, sockets)
+    if socket is None:
+        return tr(_CCD_ROW_KEY, number=index + 1)
+    return tr(_SOCKET_CCD_ROW_KEY, socket=socket + 1,
+              number=index - socket * (ccd_count // sockets) + 1)
+
+
 def _ccd_grid_columns(count: int) -> int:
     """Two CCDs get two wide graphs on top of each other; more go side by side."""
     return 1 if count <= 2 else 2 if count <= 8 else 4
 
 
 def _ccd_lines(temps: list, groups: list, per_core: list, freqs_mhz: list,
-               watts: list | None = None) -> str:
+               watts: list | None = None, sockets: int = 1) -> str:
     """"CCD 1: 48 °C · 12% · 4.70 GHz · 21.3 W" per CCD; nothing on a CPU with a single CCD.
 
     The watts are only there once the hardware data setup gave the app root access."""
@@ -177,31 +224,35 @@ def _ccd_lines(temps: list, groups: list, per_core: list, freqs_mhz: list,
             parts.append(f"{freq / 1000:.2f} GHz")
         if watts and len(watts) == len(temps) and watts[index] is not None:
             parts.append(f"{watts[index]:.1f} W")
-        lines.append(f"{tr(_CCD_ROW_KEY, number=index + 1)}: "
+        lines.append(f"{_ccd_name(index, len(temps), sockets)}: "
                      f"{' · '.join(parts) or tr('Not available')}<br>")
     return "".join(lines)
 
 
 def _row_key_pattern(key: str) -> str:
-    return re.escape(tr(key)).replace(r"\{number\}", r"\d+")
+    return re.sub(r"\\\{\w+\\\}", r"\\d+", re.escape(tr(key)))
 
 
-def _core_grid_columns(count: int) -> int:
+def _core_grid_columns(count: int, blocks: list[int] | None = None) -> int:
     """Columns for the per-core grid, laid out like Windows: a full rectangle
     (12 -> 4x3, 8 -> 4x2, 32 -> 8x4) whose cells are a little wider than tall
     in the 16:9 chart area. Empty slots are only accepted when they buy a much
     better shape, e.g. for prime counts or hundreds of threads.
+
+    blocks are the thread counts of the CCDs; each CCD starts on a new row, so a
+    column count that fills every CCD's rows completely wins (4 x 12 -> 6 columns).
     """
+    blocks = blocks or [count]
     if count <= 1:
         return 1
 
     def score(columns: int) -> float:
-        rows = math.ceil(count / columns)
+        rows = sum(math.ceil(size / columns) for size in blocks)
         cell_aspect = (16 / 9) * rows / columns
         empty = rows * columns - count
         return abs(math.log(cell_aspect / 1.4)) + 5 * empty / (rows * columns)
 
-    return min(range(1, count + 1), key=score)
+    return min(range(1, max(blocks) + 1), key=score)
 
 
 class GpuGraphSlot(QWidget):
@@ -301,7 +352,7 @@ class StatsPanel(QWidget):
     def set_text(self, text: str) -> None:
         pairs, notes = self._parse(text)
         side_keys = {tr(key) for key in _SIDE_KEYS}
-        cpu_row = re.compile("|".join(_row_key_pattern(key) for key in (_CPU_ROW_KEY, _CCD_ROW_KEY)))
+        cpu_row = re.compile("|".join(_row_key_pattern(key) for key in (_CPU_ROW_KEY, _CCD_ROW_KEY, _SOCKET_CCD_ROW_KEY)))
         big_count = 0
         is_big = []
         for key, value in pairs:
@@ -480,14 +531,16 @@ class PerformancePage(QWidget):
         self._core_count = psutil.cpu_count(logical=True) or 1
         self._core_histories = [deque([0.0] * 60, maxlen=60) for _ in range(self._core_count)]
         self._core_charts: list[LiveChart] = []
+        self._ccd_separators: list[QFrame] = []
         self.cores_widget = QWidget()
         self._cores_grid = QGridLayout(self.cores_widget)
         # Tightly packed like Windows 10's "logical processors" view.
         self._cores_grid.setContentsMargins(0, 0, 0, 0)
         self._cores_grid.setSpacing(4)
-        self._rebuild_core_charts(self._core_count)
         # One graph per CCD (core chiplet), built once the CCDs are known.
         self._ccd_groups: list[list[int]] = []
+        self._cpu_sockets = 1
+        self._rebuild_core_charts(self._core_count)
         self._ccd_histories: list[deque] = []
         self._ccd_charts: list[LiveChart] = []
         self.ccds_widget = QWidget()
@@ -662,11 +715,15 @@ class PerformancePage(QWidget):
             chart = LiveChart(max_points=60, line_color=self._color_for("cpu"))
             chart.set_theme(self._dark, self._chart_bg)
             chart.set_data(history)
-            chart.set_overlay_text(tr("CCD {number}", number=i + 1))
+            chart.set_overlay_text(
+                f"{_ccd_name(i, len(groups), self._cpu_sockets)} · CPU {_cpu_ranges(groups[i])}"
+            )
             chart.setMinimumHeight(30)
             self._ccds_grid.addWidget(chart, i // columns, i % columns)
             self._ccd_histories.append(history)
             self._ccd_charts.append(chart)
+        # Re-sort the per-thread graphs so each CCD's threads sit together.
+        self._rebuild_core_charts(self._core_count)
         self._update_chart_stack()
 
     def _rebuild_core_charts(self, count: int) -> None:
@@ -680,16 +737,46 @@ class PerformancePage(QWidget):
             old_histories[i] if i < len(old_histories) else deque([0.0] * 60, maxlen=60)
             for i in range(count)
         ]
+        # _core_charts stays indexed by CPU number; only the grid position follows the CCDs.
         self._core_charts = []
-        columns = _core_grid_columns(count)
+        ccd_of = _ccd_of_cpus(self._ccd_groups)
         for i in range(count):
             chart = LiveChart(max_points=60, line_color=self._color_for("cpu"))
             chart.set_theme(self._dark, self._chart_bg)
             chart.set_data(self._core_histories[i])
-            chart.set_overlay_text(f"CPU {i}")
+            ccd = ccd_of.get(i)
+            chart.set_overlay_text(
+                f"CPU {i}" if ccd is None
+                else f"CPU {i} · {_ccd_name(ccd, len(self._ccd_groups), self._cpu_sockets)}"
+            )
             chart.setMinimumHeight(30)
-            self._cores_grid.addWidget(chart, i // columns, i % columns)
             self._core_charts.append(chart)
+        # Each CCD starts on its own row, divided from the one before by a slightly
+        # thicker line in the CPU colour; between two sockets the line is thicker still.
+        self._ccd_separators = []
+        blocks = _core_blocks(count, self._ccd_groups)
+        columns = _core_grid_columns(count, [len(block) for block in blocks])
+        ccd_count = len(self._ccd_groups)
+        row = 0
+        for index, block in enumerate(blocks):
+            if row:
+                new_socket = (index < ccd_count and _ccd_socket(index, ccd_count, self._cpu_sockets)
+                              != _ccd_socket(index - 1, ccd_count, self._cpu_sockets))
+                separator = QFrame()
+                separator.setFixedHeight(4 if new_socket else 2)
+                self._ccd_separators.append(separator)
+                self._cores_grid.addWidget(separator, row, 0, 1, columns)
+                row += 1
+            for position, cpu in enumerate(block):
+                self._cores_grid.addWidget(
+                    self._core_charts[cpu], row + position // columns, position % columns
+                )
+            row += math.ceil(len(block) / columns)
+        self._style_ccd_separators()
+
+    def _style_ccd_separators(self) -> None:
+        for separator in self._ccd_separators:
+            separator.setStyleSheet(f"background: {self._color_for('cpu')}; border: none;")
 
     def _connect_tile(self, key: str, tile: ResourceTile) -> None:
         tile.mousePressEvent = lambda _e, k=key: self._select(k)
@@ -982,7 +1069,9 @@ class PerformancePage(QWidget):
         for i, pct in enumerate(snap["cpu_per_core"][: self._core_count]):
             self._core_histories[i].append(max(0.0, min(pct, 100.0)))
         ccd_groups = snap.get("ccd_cpus") or []
-        if ccd_groups != self._ccd_groups:
+        sockets = snap.get("cpu_sockets") or 1
+        if ccd_groups != self._ccd_groups or sockets != self._cpu_sockets:
+            self._cpu_sockets = sockets
             self._rebuild_ccd_charts(ccd_groups)
         for history, load in zip(self._ccd_histories, _ccd_loads(ccd_groups, snap["cpu_per_core"])):
             history.append(load)
@@ -1054,7 +1143,7 @@ class PerformancePage(QWidget):
                             if cores_power is not None else "")
         ccd_lines = _ccd_lines(snap.get("ccd_temps_c") or [], ccd_cpus,
                                snap["cpu_per_core"], snap.get("cpu_freq_per_core_mhz") or [],
-                               ccd_watts)
+                               ccd_watts, snap.get("cpu_sockets") or 1)
         values = {
             "cpu": (
                 snap["cpu_percent"],
@@ -1318,6 +1407,7 @@ class PerformancePage(QWidget):
         self.detail_chart.set_line_color(self._color_for(self._selected))
         for chart in [*self._core_charts, *self._ccd_charts]:
             chart.set_line_color(self._color_for("cpu"))
+        self._style_ccd_separators()
         self.detail_chart.set_theme(dark, chart_background)
         for chart in [*self._core_charts, *self._ccd_charts]:
             chart.set_theme(dark, chart_background)

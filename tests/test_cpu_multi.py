@@ -8,6 +8,7 @@ from unittest import mock
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+from PySide6.QtGui import QColor  # noqa: E402
 from PySide6.QtWidgets import QApplication  # noqa: E402
 
 from app import system_info  # noqa: E402
@@ -17,7 +18,8 @@ from app.system_info import (  # noqa: E402
 )
 from app.i18n import tr  # noqa: E402
 from pages.performance_page import (  # noqa: E402
-    StatsPanel, _ccd_grid_columns, _ccd_lines, _ccd_loads, _core_grid_columns, _cpu_socket_lines,
+    StatsPanel, _ccd_grid_columns, _ccd_lines, _ccd_name, _ccd_socket, _ccd_loads, _ccd_of_cpus, _core_blocks, _core_grid_columns,
+    _cpu_ranges, _cpu_socket_lines,
 )
 from tests.test_gpu_multi import FakeMonitor  # noqa: E402
 
@@ -357,6 +359,29 @@ class TestCpuDisplay(unittest.TestCase):
         self.assertEqual(_ccd_lines([48.0, 39.0], [[0], [1]], [20.0, 10.0], [], [5.0]),
                          f"{ccd1}: 48 °C · 20%<br>{ccd2}: 39 °C · 10%<br>")
 
+    def test_ccd_rows_per_socket(self):
+        name = lambda socket, number: tr("Socket {socket} · CCD {number}",  # noqa: E731
+                                         socket=socket, number=number)
+        lines = _ccd_lines([40.0, 41.0, 42.0, 43.0], [[0], [1], [2], [3]], [1.0] * 4, [], sockets=2)
+        self.assertEqual(lines, f"{name(1, 1)}: 40 °C · 1%<br>{name(1, 2)}: 41 °C · 1%<br>"
+                                f"{name(2, 1)}: 42 °C · 1%<br>{name(2, 2)}: 43 °C · 1%<br>")
+        # The side list still takes them as CCD rows.
+        panel = StatsPanel()
+        usage = tr("Utilization")
+        panel.set_text(f"Model<br>{usage}: 5%<br>" + lines)
+        keys, is_big, _notes = panel._signature
+        self.assertEqual([key for key, flag in zip(keys, is_big) if flag], [usage])
+        self.assertIn(name(2, 2), keys)
+
+    def test_ccd_names(self):
+        self.assertEqual(_ccd_name(2, 4), tr("CCD {number}", number=3))
+        self.assertEqual(_ccd_name(13, 24, 2), tr("Socket {socket} · CCD {number}", socket=2, number=2))
+        self.assertEqual([_ccd_socket(i, 24, 2) for i in (0, 11, 12, 23)], [0, 0, 1, 1])
+        # One CPU, or CCDs that don't split evenly: plain numbers.
+        self.assertIsNone(_ccd_socket(1, 4, 1))
+        self.assertIsNone(_ccd_socket(1, 3, 2))
+        self.assertEqual(_ccd_name(2, 3, 2), tr("CCD {number}", number=3))
+
     def test_one_ccd_gets_no_rows(self):
         self.assertEqual(_ccd_lines([48.0], [[0, 1]], [1.0, 2.0], []), "")
         self.assertEqual(_ccd_lines([], [], [], []), "")
@@ -378,6 +403,14 @@ class TestCpuDisplay(unittest.TestCase):
                 self.assertEqual(_core_grid_columns(threads), columns)
                 self.assertEqual(threads % columns, 0)
 
+    def test_core_grid_columns_fill_every_ccd(self):
+        # Each CCD starts on a new row, so its threads fill whole rows.
+        for blocks, columns in (([16, 16], 8), ([12, 12], 6), ([12] * 4, 6),
+                                ([16] * 8, 16), ([16] * 24, 16)):
+            with self.subTest(blocks=blocks):
+                self.assertEqual(_core_grid_columns(sum(blocks), blocks), columns)
+                self.assertTrue(all(size % columns == 0 for size in blocks))
+
     def test_ccd_loads_are_the_mean_of_their_threads(self):
         per_core = [10.0, 30.0, 100.0, 100.0, 50.0]
         self.assertEqual(_ccd_loads([[0, 1], [2, 3]], per_core), [20.0, 100.0])
@@ -389,6 +422,23 @@ class TestCpuDisplay(unittest.TestCase):
         for count, columns in ((2, 1), (4, 2), (8, 2), (12, 4), (16, 4)):
             with self.subTest(count=count):
                 self.assertEqual(_ccd_grid_columns(count), columns)
+
+    def test_cpu_ranges(self):
+        self.assertEqual(_cpu_ranges([0, 1, 2, 3, 8, 9]), "0–3, 8–9")
+        self.assertEqual(_cpu_ranges([5]), "5")
+        self.assertEqual(_cpu_ranges([9, 1, 8, 0, 4]), "0–1, 4, 8–9")
+
+    def test_ccd_of_cpus(self):
+        self.assertEqual(_ccd_of_cpus([[0, 2], [1, 3]]), {0: 0, 2: 0, 1: 1, 3: 1})
+        # One CCD: nothing to tell apart.
+        self.assertEqual(_ccd_of_cpus([[0, 1, 2, 3]]), {})
+
+    def test_core_blocks(self):
+        # SMT siblings of CCD 1 (0-1, 4-5) come before CCD 2; unlisted CPUs last.
+        self.assertEqual(_core_blocks(9, [[0, 1, 4, 5], [2, 3, 6, 7]]),
+                         [[0, 1, 4, 5], [2, 3, 6, 7], [8]])
+        self.assertEqual(_core_blocks(4, []), [[0, 1, 2, 3]])
+        self.assertEqual(_core_blocks(4, [[0, 1, 2, 3]]), [[0, 1, 2, 3]])
 
 
 class TestCcdGraphs(unittest.TestCase):
@@ -438,6 +488,53 @@ class TestCcdGraphs(unittest.TestCase):
         # A saved "CCDs" choice falls back to the logical processors.
         page._set_cpu_graph("ccds", save=False)
         self.assertIs(page.chart_stack.currentWidget(), page.cores_widget)
+
+    def grid_order(self, page):
+        """CPU numbers of the per-thread graphs in reading order of the grid."""
+        grid = page._cores_grid
+        columns = grid.columnCount()
+        position = {}
+        for cpu, chart in enumerate(page._core_charts):
+            row, column, _, _ = grid.getItemPosition(grid.indexOf(chart))
+            position[cpu] = row * columns + column
+        return sorted(position, key=position.get)
+
+    def test_graphs_are_sorted_and_named_by_ccd(self):
+        page = self.make_page([[0, 2], [1, 3]])
+        ccd = lambda n: tr("CCD {number}", number=n)  # noqa: E731
+        cores = page._core_charts
+        self.assertEqual(self.grid_order(page)[:4], [0, 2, 1, 3])
+        # CCD 2 starts on a new row, below a line spanning the whole grid.
+        grid = page._cores_grid
+        row_of = lambda widget: grid.getItemPosition(grid.indexOf(widget))  # noqa: E731
+        separator = page._ccd_separators[0]
+        columns = max(row_of(chart)[1] for chart in cores) + 1
+        self.assertEqual(row_of(separator), (row_of(cores[0])[0] + 1, 0, 1, columns))
+        self.assertEqual(separator.maximumHeight(), 2)
+        self.assertEqual(row_of(cores[1])[:2], (row_of(separator)[0] + 1, 0))
+        self.assertEqual(cores[2]._overlay_text, f"CPU 2 · {ccd(1)}")
+        self.assertEqual(cores[1]._overlay_text, f"CPU 1 · {ccd(2)}")
+        self.assertEqual(page._ccd_charts[0]._overlay_text, f"{ccd(1)} · CPU 0, 2")
+        # Every graph keeps the one CPU colour, also after a theme change.
+        page.set_theme(True)
+        self.assertEqual({chart._line_color.name() for chart in [*cores, *page._ccd_charts]},
+                         {QColor(page._color_for("cpu")).name()})
+        self.assertIn(page._color_for("cpu"), separator.styleSheet())
+
+    def test_sockets_get_a_thicker_line_and_their_own_ccd_numbers(self):
+        page = self.make_page([[0], [1], [2], [3]])
+        with mock.patch.object(page, "_cpu_sockets", 2):
+            page._rebuild_ccd_charts([[0], [1], [2], [3]])
+        self.assertEqual([s.maximumHeight() for s in page._ccd_separators[:3]], [2, 4, 2])
+        name = tr("Socket {socket} · CCD {number}", socket=2, number=1)
+        self.assertEqual(page._core_charts[2]._overlay_text, f"CPU 2 · {name}")
+        self.assertEqual(page._ccd_charts[2]._overlay_text, f"{name} · CPU 2")
+
+    def test_single_ccd_threads_have_no_tag(self):
+        page = self.make_page([[0, 1, 2, 3]])
+        self.assertEqual(page._core_charts[2]._overlay_text, "CPU 2")
+        self.assertEqual(self.grid_order(page), list(range(len(page._core_charts))))
+        self.assertEqual(page._ccd_separators, [])
 
 
 if __name__ == "__main__":
