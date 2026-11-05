@@ -154,13 +154,17 @@ class Settings:
         self._store.setValue("window_geometry", value)
 
     @property
-    def cpu_per_core(self) -> bool:
-        """CPU chart shows one graph per logical processor instead of the overall one."""
-        return self._store.value("cpu_per_core", False, type=bool)
+    def cpu_graph(self) -> str:
+        """CPU chart: "overall", "cores" (one graph per logical processor) or "ccds"
+        (one per core chiplet). Older versions only stored cpu_per_core."""
+        value = self._store.value("cpu_graph", "", type=str)
+        if value in ("overall", "cores", "ccds"):
+            return value
+        return "cores" if self._store.value("cpu_per_core", False, type=bool) else "overall"
 
-    @cpu_per_core.setter
-    def cpu_per_core(self, value: bool) -> None:
-        self._store.setValue("cpu_per_core", value)
+    @cpu_graph.setter
+    def cpu_graph(self, value: str) -> None:
+        self._store.setValue("cpu_graph", value)
 
     @property
     def remote_enabled(self) -> bool:

@@ -89,5 +89,27 @@ class TestLegacyMigration(unittest.TestCase):
         self.assertFalse(os.path.exists(self.legacy_folder))
 
 
+
+class TestCpuGraph(unittest.TestCase):
+    """The CPU graph choice; older versions only stored cpu_per_core."""
+
+    setUp = TestLegacyMigration.setUp
+    _restore_settings_path = staticmethod(TestLegacyMigration._restore_settings_path)
+    _write = TestLegacyMigration._write
+
+    def test_default_is_overall(self):
+        self.assertEqual(Settings().cpu_graph, "overall")
+
+    def test_old_per_core_setting_is_kept(self):
+        self._write(self.path, "[General]\ncpu_per_core=true\n", 0o600)
+        self.assertEqual(Settings().cpu_graph, "cores")
+
+    def test_saved_choice_wins(self):
+        self._write(self.path, "[General]\ncpu_per_core=true\n", 0o600)
+        settings = Settings()
+        settings.cpu_graph = "ccds"
+        self.assertEqual(settings.cpu_graph, "ccds")
+
+
 if __name__ == "__main__":
     unittest.main()

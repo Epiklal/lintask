@@ -24,6 +24,7 @@ from PySide6.QtWidgets import (
 )
 
 from app.system_info import (
+    CcdPowerMonitor,
     CpuPowerMonitor,
     DiskSmartWorker,
     GPU_ENGINE_METRICS,
@@ -58,9 +59,12 @@ _SIDE_KEYS = {N_("Cores"), N_("Logical processors"), N_("Adapter"), N_("IPv4 add
               N_("Link speed"), N_("Power cycles"), N_("Power-on hours"),
               N_("Driver"), N_("Driver version"), N_("Physical location"), "PCIe",
               N_("Maximum link"), N_("PCIe link"), N_("PCIe status"), N_("PCIe receive"),
-              N_("PCIe send"), N_("Power draw"), N_("Sockets")}
+              N_("PCIe send"), N_("Power draw"), N_("Sockets"),
+              N_("Cores power draw")}
 # The per-socket rows "CPU 1", "CPU 2", … go to the list on the right as well.
 _CPU_ROW_KEY = N_("CPU {number}")
+# The core chiplets of Ryzen, Threadripper and EPYC: "CCD 1", "CCD 2", …
+_CCD_ROW_KEY = N_("CCD {number}")
 # Network graphs never scale below this (KBit/s), so idle noise doesn't fill the graph.
 _NET_SCALE_FLOOR_KBIT = 100.0
 _GPU_MAX_GRAPHS = 10
@@ -135,6 +139,51 @@ def _cpu_socket_lines(temps: list, watts: list) -> str:
         lines.append(f"{tr(_CPU_ROW_KEY, number=index + 1)}: "
                      f"{' · '.join(parts) or tr('Not available')}<br>")
     return "".join(lines)
+
+
+def _cpus_average(values: list, cpus: list) -> float | None:
+    """Mean of `values` over the logical CPUs `cpus`; None when none of them has a value."""
+    picked = [values[cpu] for cpu in cpus if cpu < len(values) and values[cpu] is not None]
+    return sum(picked) / len(picked) if picked else None
+
+
+def _ccd_loads(groups: list, per_core: list) -> list[float]:
+    """Utilization of each CCD in %: the mean of its logical processors."""
+    return [max(0.0, min(_cpus_average(per_core, cpus) or 0.0, 100.0)) for cpus in groups]
+
+
+def _ccd_grid_columns(count: int) -> int:
+    """Two CCDs get two wide graphs on top of each other; more go side by side."""
+    return 1 if count <= 2 else 2 if count <= 8 else 4
+
+
+def _ccd_lines(temps: list, groups: list, per_core: list, freqs_mhz: list,
+               watts: list | None = None) -> str:
+    """"CCD 1: 48 °C · 12% · 4.70 GHz · 21.3 W" per CCD; nothing on a CPU with a single CCD.
+
+    The watts are only there once the hardware data setup gave the app root access."""
+    if len(temps) < 2:
+        return ""
+
+    lines = []
+    for index, temp in enumerate(temps):
+        cpus = groups[index] if len(groups) == len(temps) else []
+        parts = [f"{temp:.0f} °C"] if temp is not None else []
+        load = _cpus_average(per_core, cpus)
+        if load is not None:
+            parts.append(f"{load:.0f}%")
+        freq = _cpus_average(freqs_mhz, cpus)
+        if freq:
+            parts.append(f"{freq / 1000:.2f} GHz")
+        if watts and len(watts) == len(temps) and watts[index] is not None:
+            parts.append(f"{watts[index]:.1f} W")
+        lines.append(f"{tr(_CCD_ROW_KEY, number=index + 1)}: "
+                     f"{' · '.join(parts) or tr('Not available')}<br>")
+    return "".join(lines)
+
+
+def _row_key_pattern(key: str) -> str:
+    return re.escape(tr(key)).replace(r"\{number\}", r"\d+")
 
 
 def _core_grid_columns(count: int) -> int:
@@ -252,7 +301,7 @@ class StatsPanel(QWidget):
     def set_text(self, text: str) -> None:
         pairs, notes = self._parse(text)
         side_keys = {tr(key) for key in _SIDE_KEYS}
-        cpu_row = re.compile(re.escape(tr(_CPU_ROW_KEY)).replace(r"\{number\}", r"\d+"))
+        cpu_row = re.compile("|".join(_row_key_pattern(key) for key in (_CPU_ROW_KEY, _CCD_ROW_KEY)))
         big_count = 0
         is_big = []
         for key, value in pairs:
@@ -338,6 +387,7 @@ class PerformancePage(QWidget):
         self._gpu_worker.snapshotReady.connect(self._on_gpu_snapshot_ready)
         self._gpu_worker.start()
         self._cpu_power_monitor = CpuPowerMonitor()
+        self._ccd_power_monitor = CcdPowerMonitor()
         self._cpu_model = get_cpu_model_name()
         self._ram_speed_mhz = get_ram_speed_mhz()
         self._ram_temp_c, self._ram_temp_sensor_count = get_ram_temperature()
@@ -436,11 +486,19 @@ class PerformancePage(QWidget):
         self._cores_grid.setContentsMargins(0, 0, 0, 0)
         self._cores_grid.setSpacing(4)
         self._rebuild_core_charts(self._core_count)
+        # One graph per CCD (core chiplet), built once the CCDs are known.
+        self._ccd_groups: list[list[int]] = []
+        self._ccd_histories: list[deque] = []
+        self._ccd_charts: list[LiveChart] = []
+        self.ccds_widget = QWidget()
+        self._ccds_grid = QGridLayout(self.ccds_widget)
+        self._ccds_grid.setContentsMargins(0, 0, 0, 0)
+        self._ccds_grid.setSpacing(4)
 
         self.chart_stack = QStackedLayout()
         self.chart_stack.addWidget(self.detail_chart)
         self.chart_stack.addWidget(self.cores_widget)
-        for widget in (self.detail_chart, self.cores_widget):
+        for widget in (self.detail_chart, self.cores_widget, self.ccds_widget):
             widget.setContextMenuPolicy(Qt.CustomContextMenu)
             widget.customContextMenuRequested.connect(
                 lambda pos, w=widget: self._show_cpu_context_menu(w.mapToGlobal(pos))
@@ -475,6 +533,7 @@ class PerformancePage(QWidget):
         self._rebuild_gpu_slots()
 
         self.chart_stack.addWidget(self.gpu_graphs_widget)
+        self.chart_stack.addWidget(self.ccds_widget)
         chart_area = QWidget()
         chart_area.setLayout(self.chart_stack)
 
@@ -537,7 +596,7 @@ class PerformancePage(QWidget):
         self.detail_chart.set_data(self._history["cpu"])
         self.tiles["cpu"].setProperty("selected", True)
 
-        self._show_per_core = False
+        self._cpu_graph = "overall"  # "overall", "cores" or "ccds"
         self._prev_net = None
         self._prev_disk_io: dict[str, dict] = {}
         self.timer = QTimer(self)
@@ -545,18 +604,24 @@ class PerformancePage(QWidget):
         self.timer.start(500)
         self._tick()
         self.core_toggle_btn.setVisible(True)
-        if settings is not None and settings.cpu_per_core:
-            self.core_toggle_btn.setChecked(True)
+        if settings is not None:
+            self._set_cpu_graph(settings.cpu_graph, save=False)
 
     def _on_core_toggle(self, checked: bool) -> None:
-        self._show_per_core = checked
-        if self._settings is not None:
-            self._settings.cpu_per_core = checked
+        self._set_cpu_graph("cores" if checked else "overall")
+
+    def _set_cpu_graph(self, mode: str, save: bool = True) -> None:
+        self._cpu_graph = mode
+        if save and self._settings is not None:
+            self._settings.cpu_graph = mode
+        self.core_toggle_btn.blockSignals(True)
+        self.core_toggle_btn.setChecked(mode != "overall")
+        self.core_toggle_btn.blockSignals(False)
         self._update_chart_stack()
 
     def _show_cpu_context_menu(self, global_pos) -> None:
         """Right-click on the CPU graph, as in Windows: switch between one overall
-        graph and one graph per logical processor."""
+        graph, one graph per logical processor and (with several CCDs) one per CCD."""
         if self._selected != "cpu":
             return
         menu = QMenu(self)
@@ -565,14 +630,44 @@ class PerformancePage(QWidget):
 
     def _add_cpu_graph_menu(self, menu: QMenu) -> None:
         change_menu = menu.addMenu(tr("Change graph to"))
-        for label, per_core in ((N_("Overall utilization"), False),
-                                (N_("Logical processors"), True)):
+        options = [(N_("Overall utilization"), "overall"), (N_("Logical processors"), "cores")]
+        if self._ccd_charts:
+            options.append((N_("CCDs"), "ccds"))
+        for label, mode in options:
             action = change_menu.addAction(tr(label))
             action.setCheckable(True)
-            action.setChecked(self._show_per_core == per_core)
-            action.triggered.connect(
-                lambda _checked=False, p=per_core: self.core_toggle_btn.setChecked(p)
-            )
+            action.setChecked(self._shown_cpu_graph() == mode)
+            action.triggered.connect(lambda _checked=False, m=mode: self._set_cpu_graph(m))
+
+    def _shown_cpu_graph(self) -> str:
+        """The saved mode, except "ccds" on a CPU with a single CCD shows the cores."""
+        if self._cpu_graph == "ccds" and not self._ccd_charts:
+            return "cores"
+        return self._cpu_graph
+
+    def _rebuild_ccd_charts(self, groups: list) -> None:
+        while self._ccds_grid.count():
+            item = self._ccds_grid.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+        self._ccd_groups = groups
+        self._ccd_histories = []
+        self._ccd_charts = []
+        if len(groups) < 2:
+            self._update_chart_stack()
+            return
+        columns = _ccd_grid_columns(len(groups))
+        for i in range(len(groups)):
+            history = deque([0.0] * 60, maxlen=60)
+            chart = LiveChart(max_points=60, line_color=self._color_for("cpu"))
+            chart.set_theme(self._dark, self._chart_bg)
+            chart.set_data(history)
+            chart.set_overlay_text(tr("CCD {number}", number=i + 1))
+            chart.setMinimumHeight(30)
+            self._ccds_grid.addWidget(chart, i // columns, i % columns)
+            self._ccd_histories.append(history)
+            self._ccd_charts.append(chart)
+        self._update_chart_stack()
 
     def _rebuild_core_charts(self, count: int) -> None:
         while self._cores_grid.count():
@@ -674,7 +769,9 @@ class PerformancePage(QWidget):
     def _update_chart_stack(self) -> None:
         if self._kind(self._selected) == "gpu":
             self.chart_stack.setCurrentIndex(2)
-        elif self._selected == "cpu" and self._show_per_core:
+        elif self._selected == "cpu" and self._shown_cpu_graph() == "ccds":
+            self.chart_stack.setCurrentWidget(self.ccds_widget)
+        elif self._selected == "cpu" and self._shown_cpu_graph() == "cores":
             self.chart_stack.setCurrentIndex(1)
         else:
             self.chart_stack.setCurrentIndex(0)
@@ -884,10 +981,16 @@ class PerformancePage(QWidget):
 
         for i, pct in enumerate(snap["cpu_per_core"][: self._core_count]):
             self._core_histories[i].append(max(0.0, min(pct, 100.0)))
-        if self._selected == "cpu" and self._show_per_core:
-            for chart in self._core_charts:
-                chart.advance_grid()
-                chart.update()
+        ccd_groups = snap.get("ccd_cpus") or []
+        if ccd_groups != self._ccd_groups:
+            self._rebuild_ccd_charts(ccd_groups)
+        for history, load in zip(self._ccd_histories, _ccd_loads(ccd_groups, snap["cpu_per_core"])):
+            history.append(load)
+        shown = self._shown_cpu_graph() if self._selected == "cpu" else ""
+        for chart in (self._core_charts if shown == "cores"
+                      else self._ccd_charts if shown == "ccds" else []):
+            chart.advance_grid()
+            chart.update()
 
         elapsed = self.timer.interval() / 1000
 
@@ -928,6 +1031,9 @@ class PerformancePage(QWidget):
         cpu_power = self._cpu_power_monitor.poll_watts()
         cpu_watts = self._cpu_power_monitor.cpu_watts
         cpu_power_reason = self._cpu_power_monitor.unavailable_reason()
+        cores_power = self._cpu_power_monitor.cores_watts
+        ccd_cpus = snap.get("ccd_cpus") or []
+        ccd_watts = self._ccd_power_monitor.ccd_watts(ccd_cpus)
         if self._remote_snapshot is not None:
             # Temperature and power belong to the monitored server, not this PC.
             cpu_temp = self._remote_snapshot.get("cpu_temp_c")
@@ -936,11 +1042,19 @@ class PerformancePage(QWidget):
             # Older servers don't send the per-socket lists.
             cpu_temps = self._remote_snapshot.get("cpu_temps_c") or []
             cpu_watts = self._remote_snapshot.get("cpu_powers_w") or []
+            cores_power = self._remote_snapshot.get("cpu_cores_power_w")
+            ccd_watts = self._remote_snapshot.get("ccd_powers_w") or []
         # With several CPUs the big value is the hottest one; each is listed on the right.
         temp_label = tr("Highest temperature") if len(cpu_temps) > 1 else tr("Temperature")
         cpu_model = tr(
             (self._remote_snapshot or {}).get("cpu_model") or self._cpu_model
         )
+        # Without root, RAPL gives the cores together, not each CCD on its own.
+        cores_power_line = (f"{tr('Cores power draw')}: {cores_power:.1f} W<br>"
+                            if cores_power is not None else "")
+        ccd_lines = _ccd_lines(snap.get("ccd_temps_c") or [], ccd_cpus,
+                               snap["cpu_per_core"], snap.get("cpu_freq_per_core_mhz") or [],
+                               ccd_watts)
         values = {
             "cpu": (
                 snap["cpu_percent"],
@@ -952,8 +1066,10 @@ class PerformancePage(QWidget):
                 f"{temp_label}: {_format_or_na(cpu_temp, '.0f', '°C')}<br>"
                 f"{tr('Power draw')}: "
                 f"{_format_or_na(cpu_power, '.1f', ' W') if cpu_power is not None else tr(cpu_power_reason)}<br>"
+                f"{cores_power_line}"
                 f"{tr('Sockets')}: {snap.get('cpu_sockets', 1)}<br>"
                 f"{_cpu_socket_lines(cpu_temps, cpu_watts)}"
+                f"{ccd_lines}"
                 f"{tr('Processes')}: {snap['process_count']}<br>"
                 f"{tr('Uptime')}: {_format_uptime(snap['uptime_seconds'])}",
             ),
@@ -1180,6 +1296,7 @@ class PerformancePage(QWidget):
 
     def shutdown(self) -> None:
         self.timer.stop()
+        self._ccd_power_monitor.stop()
         if self._gpu_worker is not None:
             self._gpu_worker.stop()
             self._gpu_worker.deleteLater()
@@ -1199,10 +1316,10 @@ class PerformancePage(QWidget):
             tile.set_theme(dark, chart_background)
             tile.chart.set_line_color(self._color_for(key))
         self.detail_chart.set_line_color(self._color_for(self._selected))
-        for chart in self._core_charts:
+        for chart in [*self._core_charts, *self._ccd_charts]:
             chart.set_line_color(self._color_for("cpu"))
         self.detail_chart.set_theme(dark, chart_background)
-        for chart in self._core_charts:
+        for chart in [*self._core_charts, *self._ccd_charts]:
             chart.set_theme(dark, chart_background)
         for slot in [*self._gpu_slots, self.gpu_vram_slot, self.gpu_shared_slot]:
             slot.chart.set_line_color(self._color_for("gpu"))

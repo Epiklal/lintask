@@ -145,6 +145,60 @@ if [[ "${1:-}" == "drop-caches" ]]; then
     exit 0
 fi
 
+# Streams the per-core energy counters of an AMD CPU, one sample a second, so the
+# app can show the power draw of each CCD. It reads only these two registers.
+CPU_ENERGY_PY='
+import sys
+
+def main():
+    import glob, os, time
+    RAPL_PWR_UNIT = 0xC0010299
+    CORE_ENERGY_STAT = 0xC001029A
+    with open("/proc/cpuinfo") as handle:
+        if "AuthenticAMD" not in handle.read():
+            sys.exit(3)
+    devices = {}
+    for path in glob.glob("/dev/cpu/[0-9]*/msr"):
+        devices[int(path.split("/")[3])] = os.open(path, os.O_RDONLY)
+    if not devices:
+        sys.exit(3)
+
+    def read(fd, register):
+        return int.from_bytes(os.pread(fd, 8, register), "little")
+
+    unit = (read(devices[min(devices)], RAPL_PWR_UNIT) >> 8) & 0x1F
+    while True:
+        sample = " ".join("%d:%d" % (cpu, read(fd, CORE_ENERGY_STAT) & 0xFFFFFFFF)
+                          for cpu, fd in sorted(devices.items()))
+        print("%d %d %s" % (time.monotonic_ns(), unit, sample), flush=True)
+        time.sleep(1)
+
+try:
+    main()
+except SystemExit:
+    raise
+except BrokenPipeError:
+    # The reader is gone; without this, flushing stdout at exit complains once more.
+    import os
+    os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
+    sys.exit(0)
+except OSError:
+    sys.exit(4)
+except Exception:
+    sys.exit(5)
+'
+
+if [[ "${1:-}" == "cpu-energy" ]]; then
+    [[ -e /dev/cpu/0/msr ]] || modprobe msr 2>/dev/null || true
+    for python in /usr/bin/python3 /bin/python3; do
+        if [[ -x "$python" ]]; then
+            exec "$python" -I -S -c "$CPU_ENERGY_PY"
+        fi
+    done
+    echo "python3 is not installed" >&2
+    exit 127
+fi
+
 device="${1:-}"
 if [[ ! "$device" =~ ^[[:alnum:]._-]+$ ]] || [[ ! -b "/dev/$device" ]]; then
     echo "Invalid block device" >&2

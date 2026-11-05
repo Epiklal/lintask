@@ -186,7 +186,7 @@ class SettingsPage(QWidget):
         remote_form.addRow(tr("Access token:"), self.remote_token_edit)
         remote_form.addRow(self.remote_connect_button)
 
-        smart_box = QGroupBox(tr("Hardware data (SMART, memory, CPU power)"))
+        smart_box = QGroupBox(tr("Hardware data (SMART, memory, CPU and CCD power)"))
         self.smart_setup_button = QPushButton(tr("Set up hardware data with sudo"))
         self.smart_setup_button.clicked.connect(self._setup_smart_access)
         self.smart_status = QLabel(self._smart_status_text())

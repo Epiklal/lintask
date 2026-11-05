@@ -1219,8 +1219,12 @@ class CpuPowerMonitor:
 
     def __init__(self):
         self._counters = _rapl_counters("package")
+        # Intel's core sub-zone (PP0) is all cores together. On AMD the kernel reads the
+        # per-core energy register of a single core there, so it is no total at all.
+        self._core_counters = [] if _is_amd_cpu() else _rapl_counters("core")
         self._hwmon_power_paths = [] if self._counters else self._find_hwmon_power_paths()
         self.cpu_watts: list[float | None] = []
+        self.cores_watts: float | None = None
 
     def available(self) -> bool:
         return bool(self._counters or self._hwmon_power_paths)
@@ -1254,6 +1258,9 @@ class CpuPowerMonitor:
             readings = [self._read_hwmon_watts(path) for path in self._hwmon_power_paths]
         # One entry per socket (CPU 1, CPU 2, …), None while one cannot be read.
         self.cpu_watts = readings
+        core_readings = [counter.poll_watts() for counter in self._core_counters]
+        self.cores_watts = (sum(core_readings)
+                            if core_readings and None not in core_readings else None)
         watts = [value for value in readings if value is not None]
         return sum(watts) if watts else None
 
@@ -1266,6 +1273,17 @@ class CpuPowerMonitor:
             return None
 
 
+def _is_amd_cpu(cpuinfo_path: str = "/proc/cpuinfo") -> bool:
+    try:
+        with open(cpuinfo_path) as f:
+            for line in f:
+                if line.startswith("vendor_id"):
+                    return "AuthenticAMD" in line or "HygonGenuine" in line
+    except OSError:
+        pass
+    return False
+
+
 def get_cpu_model_name() -> str:
     try:
         with open("/proc/cpuinfo") as f:
@@ -1275,6 +1293,12 @@ def get_cpu_model_name() -> str:
     except OSError:
         pass
     return N_("Unknown CPU")
+
+
+# Chips that measure something else than the CPU, even when a label says "CPU".
+_NON_CPU_SENSOR_CHIPS = {"nvme", "drivetemp", "amdgpu", "radeon", "nouveau", "i915", "xe",
+                         "jc42", "spd5118", "iwlwifi_1", "mt7921_phy0", "BAT0", "BAT1",
+                         "acpitz", "pch_cannonlake", "pch_skylake"}
 
 
 def get_cpu_temperatures() -> list[float]:
@@ -1304,9 +1328,15 @@ def get_cpu_temperatures() -> list[float]:
             if per_chip:
                 return per_chip
         return [entries[0].current]
-    for entries in temps.values():
-        if entries:
-            return [entries[0].current]
+    # Without a CPU driver only a board chip may still see the CPU: AMD SB-TSI or
+    # Intel PECI first, then the socket thermistor. Never an NVMe or GPU sensor.
+    for pattern in (r"\b(TSI|PECI)\b", r"\bCPU"):
+        for name, entries in temps.items():
+            if name in _NON_CPU_SENSOR_CHIPS:
+                continue
+            for entry in entries:
+                if re.search(pattern, entry.label or "", re.IGNORECASE):
+                    return [entry.current]
     return []
 
 
@@ -1324,6 +1354,210 @@ def get_cpu_socket_count(cpu_base: str = "/sys/devices/system/cpu") -> int:
     }
     packages.discard(None)
     return max(len(packages), 1)
+
+
+_HWMON_BASE = "/sys/class/hwmon"
+
+
+def get_ccd_temperatures(hwmon_base: str = _HWMON_BASE) -> list[float]:
+    """One temperature per CCD (the core chiplets of Ryzen, Threadripper and EPYC).
+
+    k10temp labels them Tccd1 … Tccd12 per chip. sysfs is read directly because
+    psutil sorts temp10 before temp3 and merges the chips of several sockets.
+    """
+    temps = []
+    for hwmon_dir in sorted(glob.glob(f"{hwmon_base}/hwmon*"), key=_natural_key):
+        if _read_sysfs_str(f"{hwmon_dir}/name") != "k10temp":
+            continue
+        per_chip = []
+        for label_path in glob.glob(f"{hwmon_dir}/temp*_label"):
+            match = re.fullmatch(r"Tccd(\d+)", _read_sysfs_str(label_path) or "")
+            value = _read_sysfs_str(label_path.removesuffix("_label") + "_input")
+            if match and value and value.lstrip("-").isdigit():
+                per_chip.append((int(match.group(1)), int(value) / 1000))
+        temps.extend(temp for _ccd, temp in sorted(per_chip))
+    return temps
+
+
+def _parse_cpu_list(text: str) -> list[int]:
+    """"0-7,16-23" -> [0, …, 7, 16, …, 23]."""
+    cpus = []
+    for part in text.split(","):
+        first, _, last = part.partition("-")
+        if first.isdigit() and (not last or last.isdigit()):
+            cpus.extend(range(int(first), int(last or first) + 1))
+    return cpus
+
+
+@functools.lru_cache(maxsize=1)
+def get_l3_cpu_groups(cpu_base: str = "/sys/devices/system/cpu") -> tuple[tuple[int, ...], ...]:
+    """The logical CPUs sharing each L3 cache, ordered by their first CPU.
+
+    On AMD Zen 3 and newer one L3 is one CCD; Zen 2 has two (one per CCX).
+    """
+    groups = set()
+    for path in glob.glob(f"{cpu_base}/cpu[0-9]*/cache/index*/level"):
+        if _read_sysfs_str(path) != "3":
+            continue
+        cpus = _parse_cpu_list(_read_sysfs_str(path.removesuffix("level") + "shared_cpu_list") or "")
+        if cpus:
+            groups.add(tuple(cpus))
+    return tuple(sorted(groups))
+
+
+def get_ccd_cpu_groups(ccd_count: int, l3_groups=None) -> list[list[int]]:
+    """The logical CPUs of each CCD, or [] when they can't be matched to the CCDs.
+
+    Zen 2 has two L3 caches per CCD, so consecutive groups are merged until there is
+    one per CCD.
+    """
+    if l3_groups is None:
+        l3_groups = get_l3_cpu_groups()
+    if not ccd_count or not l3_groups or len(l3_groups) % ccd_count:
+        return []
+    per_ccd = len(l3_groups) // ccd_count
+    return [sorted(cpu for group in l3_groups[index:index + per_ccd] for cpu in group)
+            for index in range(0, len(l3_groups), per_ccd)]
+
+
+def parse_energy_sample(line: str) -> tuple[int, int, dict[int, int]] | None:
+    """One line of the helper's cpu-energy stream: "<monotonic ns> <energy unit> <cpu>:<raw> …"."""
+    words = line.split()
+    if len(words) < 3 or not words[0].isdigit() or not words[1].isdigit():
+        return None
+    counters = {}
+    for word in words[2:]:
+        cpu, _, raw = word.partition(":")
+        if not cpu.isdigit() or not raw.isdigit():
+            return None
+        counters[int(cpu)] = int(raw)
+    return int(words[0]), int(words[1]), counters
+
+
+def energy_watts(previous: tuple[int, int, dict[int, int]],
+                 current: tuple[int, int, dict[int, int]]) -> dict[int, float]:
+    """Watts of each CPU between two samples. The counters are 32 bits wide and wrap."""
+    elapsed = (current[0] - previous[0]) / 1e9
+    if elapsed <= 0 or current[1] != previous[1]:
+        return {}
+    joules_per_count = 2.0 ** -current[1]
+    return {cpu: ((raw - previous[2][cpu]) & 0xFFFFFFFF) * joules_per_count / elapsed
+            for cpu, raw in current[2].items() if cpu in previous[2]}
+
+
+class CcdPowerMonitor:
+    """Power draw of each CCD of an AMD CPU, from the energy register of every core.
+
+    Those registers need root, so this only runs once the hardware data setup in the
+    settings is done. The helper then streams a sample a second through one sudo call,
+    so the system log gets one line per start instead of one a second. Without the
+    setup ccd_watts() returns [] and nothing is shown.
+    """
+
+    CHECK_SECONDS = 30
+
+    def __init__(self, cpu_base: str = "/sys/devices/system/cpu"):
+        self._cpu_base = cpu_base
+        self._amd = _is_amd_cpu()
+        self._lock = threading.Lock()
+        self._watts: dict[int, float] = {}
+        self._process: subprocess.Popen | None = None
+        self._started_helper: tuple | None = None
+        self._failed_helper: tuple | None = None
+        self._next_check = 0.0
+        self._stopped = False
+        self._core_cpus: dict[int, bool] = {}
+
+    @staticmethod
+    def _helper_identity(helper: str) -> tuple | None:
+        try:
+            info = os.stat(helper)
+        except OSError:
+            return None
+        return helper, info.st_ino, info.st_mtime_ns
+
+    def _ensure_running(self) -> None:
+        if self._stopped or not self._amd:
+            return
+        if self._process is not None:
+            if self._process.poll() is None:
+                return
+            # An older helper doesn't know cpu-energy, or the CPU has no such register.
+            # Try again only once the setup has installed a different helper.
+            self._failed_helper = self._started_helper
+            self._process = None
+        now = time.monotonic()
+        if now < self._next_check:
+            return
+        self._next_check = now + self.CHECK_SECONDS
+        helper = sudo_helper()
+        identity = self._helper_identity(helper) if helper else None
+        if identity is None or identity == self._failed_helper:
+            return
+        try:
+            process = subprocess.Popen(
+                ["sudo", "-n", helper, "cpu-energy"], stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
+            )
+        except OSError:
+            self._failed_helper = identity
+            return
+        self._process = process
+        self._started_helper = identity
+        threading.Thread(target=self._read_stream, args=(process,), daemon=True).start()
+
+    def _read_stream(self, process: subprocess.Popen) -> None:
+        previous = None
+        try:
+            for line in process.stdout:
+                sample = parse_energy_sample(line)
+                if sample is None:
+                    continue
+                if previous is not None:
+                    watts = energy_watts(previous, sample)
+                    with self._lock:
+                        self._watts = watts
+                previous = sample
+        except (OSError, ValueError):
+            pass
+        finally:
+            process.stdout.close()
+        with self._lock:
+            self._watts = {}
+
+    def _is_first_thread(self, cpu: int) -> bool:
+        """Both threads of a core read the same register; only the first one counts."""
+        if cpu not in self._core_cpus:
+            siblings = _parse_cpu_list(_read_sysfs_str(
+                f"{self._cpu_base}/cpu{cpu}/topology/thread_siblings_list") or "")
+            self._core_cpus[cpu] = not siblings or min(siblings) == cpu
+        return self._core_cpus[cpu]
+
+    def ccd_watts(self, groups: list[list[int]]) -> list[float | None]:
+        """Watts per CCD, in the order of `groups`; [] while nothing can be measured."""
+        self._ensure_running()
+        with self._lock:
+            watts = dict(self._watts)
+        if not watts or not groups:
+            return []
+        result = []
+        for cpus in groups:
+            cores = [cpu for cpu in cpus if self._is_first_thread(cpu)]
+            values = [watts.get(cpu) for cpu in cores]
+            result.append(sum(values) if values and None not in values else None)
+        return result
+
+    def stop(self) -> None:
+        self._stopped = True
+        process, self._process = self._process, None
+        if process is None:
+            return
+        # The helper runs as root, so only sudo, which forwards the signal, can end it.
+        try:
+            process.terminate()
+            process.wait(timeout=1)
+        except (OSError, subprocess.TimeoutExpired):
+            pass
 
 
 def read_dmi_memory() -> str | None:
@@ -1880,6 +2114,13 @@ class ProcessWorker(StoppableWorker):
         return rows
 
 
+def _per_core_freqs_mhz() -> list[float]:
+    try:
+        return [freq.current for freq in psutil.cpu_freq(percpu=True)]
+    except (AttributeError, OSError, NotImplementedError):
+        return []
+
+
 def system_snapshot() -> dict:
     """Cheap aggregate system stats safe to call directly on the UI thread."""
     vm = psutil.virtual_memory()
@@ -1887,6 +2128,7 @@ def system_snapshot() -> dict:
     disk_io = psutil.disk_io_counters()
     net = psutil.net_io_counters()
     freq = psutil.cpu_freq()
+    ccd_temps = get_ccd_temperatures()
     return {
         "cpu_percent": psutil.cpu_percent(interval=None),
         "cpu_per_core": psutil.cpu_percent(interval=None, percpu=True),
@@ -1895,6 +2137,9 @@ def system_snapshot() -> dict:
         "cpu_cores_physical": psutil.cpu_count(logical=False) or 0,
         "cpu_cores_logical": psutil.cpu_count(logical=True) or 0,
         "cpu_sockets": get_cpu_socket_count(),
+        "cpu_freq_per_core_mhz": _per_core_freqs_mhz(),
+        "ccd_temps_c": ccd_temps,
+        "ccd_cpus": get_ccd_cpu_groups(len(ccd_temps)),
         "process_count": len(psutil.pids()),
         "uptime_seconds": time.time() - psutil.boot_time(),
         "mem_percent": vm.percent,

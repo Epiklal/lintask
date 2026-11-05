@@ -301,6 +301,13 @@ class TestHelperScript(unittest.TestCase):
         script.write_text(text)
         return script
 
+    @unittest.skipIf(os.geteuid() == 0, "as root the helper would stream the real registers")
+    def test_cpu_energy_needs_root(self):
+        result = subprocess.run(["bash", str(HELPER), "cpu-energy"], capture_output=True,
+                                text=True, timeout=10)
+        self.assertIn(result.returncode, (3, 4))
+        self.assertEqual(result.stdout, "")
+
     def test_invalid_device_names_are_rejected(self):
         script = self.stubbed_helper()
         for device in ("", ".", "..", "../sda", "../../etc/passwd", "/dev/sda", "sda/", "sda;id",

@@ -221,6 +221,7 @@ def run_server(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT,
                record_history: bool = True) -> None:
     from app.system_info import (
         AutostartEntry,
+        CcdPowerMonitor,
         CpuPowerMonitor,
         DockerWorker,
         GpuSystemMonitor,
@@ -246,6 +247,7 @@ def run_server(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT,
     docker_worker = DockerWorker()
     service_worker = ServiceListWorker()
     cpu_power_monitor = CpuPowerMonitor()
+    ccd_power_monitor = CcdPowerMonitor()
 
     def full_snapshot() -> dict:
         process_worker._sync_process_table()
@@ -258,13 +260,16 @@ def run_server(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT,
         cpu_power = cpu_power_monitor.poll_watts()
         cpu_power_reason = cpu_power_monitor.unavailable_reason()
         cpu_temps = get_cpu_temperatures()
+        system = system_snapshot()
         return {
-            "system": system_snapshot(),
+            "system": system,
             "cpu_model": get_cpu_model_name(),
             "cpu_temp_c": max(cpu_temps, default=None),
             "cpu_temps_c": cpu_temps,
             "cpu_power_w": cpu_power,
             "cpu_powers_w": cpu_power_monitor.cpu_watts,
+            "cpu_cores_power_w": cpu_power_monitor.cores_watts,
+            "ccd_powers_w": ccd_power_monitor.ccd_watts(system.get("ccd_cpus") or []),
             "cpu_power_reason": cpu_power_reason,
             "gpu": gpus[0],
             "gpus": gpus,
