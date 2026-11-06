@@ -2351,21 +2351,45 @@ def docker_container_action(container_id: str, action: str) -> tuple[bool, str]:
         return False, str(exc)
 
 
-def kill_process(pid: int) -> tuple[bool, str]:
+def kill_processes(pids: list[int]) -> tuple[bool, str]:
+    """End the given processes together with all their child processes.
+
+    SIGTERM first so programs can save and clean up, then SIGKILL for everything still
+    alive after a second - a hung program or one that ignores SIGTERM cannot survive."""
+    own_pid = os.getpid()
+    targets: dict[int, psutil.Process] = {}
     try:
-        proc = psutil.Process(pid)
-        proc.terminate()
-        try:
-            proc.wait(timeout=2)
-        except psutil.TimeoutExpired:
-            proc.kill()
-        return True, ""
-    except psutil.NoSuchProcess:
-        return True, ""
+        for pid in pids:
+            try:
+                proc = psutil.Process(pid)
+                family = [proc, *proc.children(recursive=True)]
+            except psutil.NoSuchProcess:
+                continue
+            for member in family:
+                if member.pid != own_pid:
+                    targets[member.pid] = member
+        denied = False
+        for send in (psutil.Process.terminate, psutil.Process.kill):
+            signalled = []
+            for proc in targets.values():
+                try:
+                    send(proc)
+                    signalled.append(proc)
+                except psutil.NoSuchProcess:
+                    continue
+                except psutil.AccessDenied:
+                    denied = True
+            _gone, alive = psutil.wait_procs(signalled, timeout=1)
+            if not alive:
+                break
+            targets = {proc.pid: proc for proc in alive}
     except psutil.AccessDenied:
         return False, N_("Access denied (permission required)")
     except Exception as exc:  # pragma: no cover - defensive
         return False, str(exc)
+    if denied:
+        return False, N_("Access denied (permission required)")
+    return True, ""
 
 
 _AUTOSTART_USER_DIR = os.path.expanduser("~/.config/autostart")

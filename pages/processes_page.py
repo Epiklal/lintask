@@ -38,7 +38,7 @@ from PySide6.QtWidgets import (
 
 from app.i18n import N_, format_decimal, tr
 from app.memory_info import MIB, PageOutResult, PageOutWorker, format_bytes, is_essential
-from app.system_info import ProcessRow, ProcessWorker, kill_process
+from app.system_info import ProcessRow, ProcessWorker, kill_processes
 from widgets.resizable_table import ResizableRowsTableView
 from widgets.row_hover import RowHoverDelegate
 from widgets.table_menu import add_copy_actions, selected_rows
@@ -689,17 +689,19 @@ class ProcessesPage(QWidget):
         self.settings.set_column_widths(_COLUMN_WIDTHS_KEY, widths)
 
     def _end_selected_task(self) -> None:
-        pid = self._selected_pid()
-        if pid is None or self._remote_enabled:
+        indexes = self.table.selectionModel().selectedRows()
+        rows = self.model.rows_at(indexes[0].row()) if indexes else []
+        if not rows or self._remote_enabled:
             return
-        confirm = QMessageBox.question(
-            self,
-            tr("End task"),
-            tr("Do you really want to end the process with PID {pid}?", pid=pid),
-        )
+        if len(rows) == 1:
+            question = tr("Do you really want to end the process with PID {pid}?", pid=rows[0].pid)
+        else:
+            question = tr("Do you really want to end {name} with all {count} processes?",
+                          name=rows[0].name, count=len(rows))
+        confirm = QMessageBox.question(self, tr("End task"), question)
         if confirm != QMessageBox.Yes:
             return
-        ok, error = kill_process(pid)
+        ok, error = kill_processes([row.pid for row in rows])
         if not ok:
             QMessageBox.warning(self, tr("Error"), tr("The process could not be ended:\n{error}", error=tr(error)))
 

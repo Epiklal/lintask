@@ -184,6 +184,7 @@ GERMAN = {
     "Search processes...": "Prozesse suchen...",
     "End task": "Task beenden",
     "Do you really want to end the process with PID {pid}?": "Möchtest du den Prozess mit PID {pid} wirklich beenden?",
+    "Do you really want to end {name} with all {count} processes?": "Möchtest du {name} mit allen {count} Prozessen wirklich beenden?",
     "The process could not be ended:\n{error}": "Prozess konnte nicht beendet werden:\n{error}",
     "Run command": "Befehl ausführen",
     "Command:": "Befehl:",
