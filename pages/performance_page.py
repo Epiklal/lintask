@@ -682,7 +682,10 @@ class PerformancePage(QWidget):
         menu.exec(global_pos)
 
     def _add_cpu_graph_menu(self, menu: QMenu) -> None:
-        change_menu = menu.addMenu(tr("Change graph to"))
+        # A parent keeps the submenu alive: some PySide6 builds delete an addMenu(title) menu
+        # as soon as the Python reference is gone.
+        change_menu = QMenu(tr("Change graph to"), menu)
+        menu.addMenu(change_menu)
         options = [(N_("Overall utilization"), "overall"), (N_("Logical processors"), "cores")]
         if self._ccd_charts:
             options.append((N_("CCDs"), "ccds"))
