@@ -5,7 +5,7 @@
 #     sudo zypper install ./dist/lintask-*.noarch.rpm   (openSUSE)
 # PySide6 and psutil come as system packages, so no venv is needed.
 
-%{!?pkg_version: %global pkg_version 1.1.3}
+%{!?pkg_version: %global pkg_version 1.2.0}
 
 Name:           lintask
 Version:        %{pkg_version}
@@ -120,6 +120,11 @@ fi
 %config(noreplace) %attr(600,root,root) %{_sysconfdir}/default/%{name}-server
 
 %changelog
+* Fri Nov 06 2026 Epiklal <https://github.com/Epiklal> - 1.2.0-1
+- CPU page shows each CCD with temperature, load, clock and power.
+- Per-thread CPU graphs are grouped by CCD and socket.
+- Tab width stays normal after switching back from the Windows 11 style.
+
 * Wed Nov 04 2026 Epiklal <https://github.com/Epiklal> - 1.1.3-1
 - RPM, AppImage, tarball and snap packages built and tested in CI.
 
