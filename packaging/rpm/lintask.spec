@@ -5,7 +5,7 @@
 #     sudo zypper install ./dist/lintask-*.noarch.rpm   (openSUSE)
 # PySide6 and psutil come as system packages, so no venv is needed.
 
-%{!?pkg_version: %global pkg_version 1.2.0}
+%{!?pkg_version: %global pkg_version 1.2.1}
 
 Name:           lintask
 Version:        %{pkg_version}
@@ -120,6 +120,9 @@ fi
 %config(noreplace) %attr(600,root,root) %{_sysconfdir}/default/%{name}-server
 
 %changelog
+* Fri Nov 06 2026 Epiklal <https://github.com/Epiklal> - 1.2.1-1
+- The "Change graph to" submenu of the CPU page is no longer empty on Ubuntu.
+
 * Fri Nov 06 2026 Epiklal <https://github.com/Epiklal> - 1.2.0-1
 - CPU page shows each CCD with temperature, load, clock and power.
 - Per-thread CPU graphs are grouped by CCD and socket.

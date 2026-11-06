@@ -16,7 +16,7 @@ APP_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$APP_DIR"
 
 PKG=lintask
-BASE_VERSION=1.2.0
+BASE_VERSION=1.2.1
 BUILD_IMAGE=ubuntu:22.04
 DOCKER_PACKAGES="ca-certificates curl file patchelf squashfs-tools xz-utils
     libxcb-cursor0 libxcb-icccm4 libxcb-image0 libxcb-keysyms1 libxcb-render-util0
