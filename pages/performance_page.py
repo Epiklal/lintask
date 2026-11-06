@@ -702,6 +702,8 @@ class PerformancePage(QWidget):
         while self._ccds_grid.count():
             item = self._ccds_grid.takeAt(0)
             if item.widget():
+                # Hidden right away: deleteLater() leaves it painted until the event loop runs.
+                item.widget().hide()
                 item.widget().deleteLater()
         self._ccd_groups = groups
         self._ccd_histories = []
@@ -730,6 +732,8 @@ class PerformancePage(QWidget):
         while self._cores_grid.count():
             item = self._cores_grid.takeAt(0)
             if item.widget():
+                # Hidden right away: deleteLater() leaves it painted until the event loop runs.
+                item.widget().hide()
                 item.widget().deleteLater()
         old_histories = self._core_histories
         self._core_count = count

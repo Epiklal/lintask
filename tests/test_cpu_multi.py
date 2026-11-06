@@ -481,6 +481,13 @@ class TestCcdGraphs(unittest.TestCase):
         page.core_toggle_btn.setChecked(False)
         self.assertIs(page.chart_stack.currentWidget(), page.detail_chart)
 
+    def test_old_graphs_are_hidden_when_the_ccds_change(self):
+        page = self.make_page([[0, 1], [2, 3]])
+        old = page._core_charts + page._ccd_charts
+        page._rebuild_ccd_charts([[0, 2], [1, 3]])
+        self.assertTrue(all(chart.isHidden() for chart in old))
+        self.assertFalse(any(chart.isHidden() for chart in page._core_charts + page._ccd_charts))
+
     def test_single_ccd_has_no_ccd_graphs(self):
         page = self.make_page([[0, 1, 2, 3]])
         self.assertEqual(page._ccd_charts, [])
