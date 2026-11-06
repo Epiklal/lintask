@@ -168,5 +168,6 @@ class NavTabWidget(QTabWidget):
 
     def set_win11(self, enabled: bool, colors: dict) -> None:
         self.nav_bar.set_colors(colors)
-        self.setTabPosition(QTabWidget.West if enabled else QTabWidget.North)
+        # Switch the bar first: moving the tabs lays them out with its size hints.
         self.nav_bar.set_win11(enabled)
+        self.setTabPosition(QTabWidget.West if enabled else QTabWidget.North)

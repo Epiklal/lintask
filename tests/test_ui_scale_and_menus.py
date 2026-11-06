@@ -10,6 +10,7 @@ from PySide6.QtWidgets import QApplication, QMenu, QPushButton, QTableView, QWid
 from app import system_info, ui_scale  # noqa: E402
 from tests.test_gpu_multi import FakeMonitor  # noqa: E402
 from widgets.table_menu import add_button_actions, rows_text  # noqa: E402
+from widgets.nav_tab_bar import NavTabWidget  # noqa: E402
 
 
 class TestFactorFor(unittest.TestCase):
@@ -98,6 +99,29 @@ class TestTableMenu(unittest.TestCase):
         self.assertFalse(actions[2].isEnabled())
         actions[0].trigger()
         self.assertEqual(clicked, [True])
+
+
+class TestNavTabStyleSwitch(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+
+    def test_tabs_get_their_normal_width_back_after_win11(self):
+        colors = {"nav_bg": "#fff", "nav_hover": "#eee", "nav_selected": "#ddd",
+                  "nav_text": "#000", "nav_accent": "#00f"}
+        tabs = NavTabWidget()
+        for name in ("Processes", "Performance", "History"):
+            tabs.addTab(QWidget(), name)
+        tabs.resize(1000, 600)
+        tabs.show()
+        self.addCleanup(tabs.close)
+        tabs.set_win11(False, colors)
+        self.app.processEvents()
+        width = tabs.nav_bar.tabRect(0).width()
+        tabs.set_win11(True, colors)
+        tabs.set_win11(False, colors)
+        self.app.processEvents()
+        self.assertEqual(tabs.nav_bar.tabRect(0).width(), width)
 
 
 class TestPerformanceTileText(unittest.TestCase):
