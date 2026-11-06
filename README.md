@@ -7,13 +7,19 @@ performance graphs, sensors, services, Docker containers, autostart entries and
 hardware benchmarks in one PySide6 desktop application. A built-in **server mode**
 lets you watch a headless Linux server from your desktop.
 
+On AMD Ryzen, Threadripper and EPYC CPUs Lintask goes further than the Windows Task
+Manager: it splits the CPU into its **CCDs** (core complex dies) and shows the
+temperature, load, clock and power draw of each one, with the per-thread graphs
+grouped by CCD and socket.
+
 Built for Linux desktops running Wayland or X11. The user interface is available in
 English and German; it follows your system language and can be switched in the settings.
 
-![Windows 10 design, light theme, performance view](docs/screenshots/win10-light-performance.png)
+![Windows 11 design, dark theme, CPU split into its two CCDs](docs/screenshots/win11-dark-cpu-ccds.png)
 
 ## Contents
 
+- [CPU and CCD view](#cpu-and-ccd-view)
 - [Screenshots](#screenshots)
 - [Features at a glance](#features-at-a-glance)
 - [What gets installed](#what-gets-installed)
@@ -34,38 +40,83 @@ English and German; it follows your system language and can be switched in the s
 - [Security](#security)
 - [Development](#development)
 
+## CPU and CCD view
+
+The CPU page has three graph modes: right-click the graph (or the CPU entry on the
+left) → **Change graph to** → *Overall utilization* / *Logical processors* / *CCDs*.
+The **Per core** button switches between the first two. The choice is remembered.
+
+| CCDs | Logical processors | Overall utilization |
+| --- | --- | --- |
+| ![One graph per CCD](docs/screenshots/win11-dark-cpu-ccds.png) | ![One graph per logical processor, grouped by CCD](docs/screenshots/win10-light-cpu-threads.png) | ![One graph for the whole CPU](docs/screenshots/win10-dark-cpu-overall.png) |
+| One graph per CCD, titled with its threads (*CCD 1 · CPU 0–7, 16–23*) | One graph per thread, each CCD on rows of its own | The whole CPU in one graph, like on Windows |
+
+- **CCDs are found automatically** from the CPUs that share an L3 cache (on Zen 2,
+  with two L3 caches per CCD, both are merged into one CCD). No setup and no root
+  rights are needed for the graphs.
+- **One line per CCD** below the graph: `CCD 1: 55 °C · 39% · 4.52 GHz` – the
+  temperature of that die (`Tccd` from the `k10temp` driver), its load and its
+  average clock. After **Set up hardware data with sudo** in the settings the line
+  also shows the **power draw of each CCD** (`· 21.3 W`), read from the energy
+  counter of every core.
+- **Clear borders**: in the *Logical processors* grid a slightly thicker line
+  (2 px) separates the CCDs and a thick line (4 px) separates the sockets. Hover a
+  graph to see where it belongs (*CPU 17 · CCD 2*).
+- **Any size**: up to 2 CCDs are shown in one column, up to 8 in two, more in four.
+  Boards with several CPUs name every die by socket (*Socket 2 · CCD 3*) and also
+  show *Sockets* and the *Highest temperature*.
+
+How the *Logical processors* grid looks on bigger CPUs (example data):
+
+| 2 CCDs | 4 CCDs |
+| --- | --- |
+| ![Ryzen 9 7950X, 2 CCDs with 8 cores each](docs/screenshots/ccd-grid-1.png) | ![Threadripper 7960X, 4 CCDs with 6 cores each](docs/screenshots/ccd-grid-2.png) |
+| Ryzen 9 7950X: 2 CCDs × 8 cores, 32 threads | Threadripper 7960X: 4 CCDs × 6 cores, 48 threads |
+| ![Threadripper 7980X, 8 CCDs with 8 cores each](docs/screenshots/ccd-grid-3.png) | ![Two EPYC 9654, 2 sockets with 12 CCDs each](docs/screenshots/ccd-grid-4.png) |
+| Threadripper 7980X: 8 CCDs × 8 cores, 128 threads | 2 × EPYC 9654: 2 sockets × 12 CCDs × 8 cores, 384 threads |
+
+On Intel CPUs and on AMD CPUs with a single CCD the *CCDs* mode is not offered, and
+the other two modes work as before.
+
 ## Screenshots
 
-The screenshots show the German interface and were taken before version 1.1.2, so a
-few details (right-click menus, the Memory entry under Performance) look slightly
-different today.
+All screenshots use the English interface; containers, processes and names in them
+are example data.
 
-| Windows 10, light | Windows 11, light |
+**Performance: every device**
+
+| Windows 11, light | Windows 10, dark |
 | --- | --- |
-| ![Process list in the Windows 10 design](docs/screenshots/win10-light-processes.png) | ![Process list in the Windows 11 design](docs/screenshots/win11-light-processes.png) |
-| Process list with heat map, grouped into apps and background processes | Navigation pane, page header with search and commands |
+| ![Memory view](docs/screenshots/win11-light-memory.png) | ![GPU view](docs/screenshots/win10-dark-gpu.png) |
+| **Memory**: RAM (solid) and swap (dashed) in one graph, with a plain rating of whether memory is tight | **GPU**: selectable engines, dedicated and shared GPU memory, temperature and power |
+| ![Network view](docs/screenshots/win11-dark-network.png) | ![Disk view](docs/screenshots/win10-light-disk.png) |
+| **Network**: receive (solid) and send (dashed), auto-scaled | **Disk**: active time and transfer rate of every physical disk, model, used space and SMART values (power-on hours, temperature) once hardware data is set up |
 
-| Windows 10, dark | Windows 11, dark |
+**Processes and history**
+
+| Windows 11, light | Windows 10, dark |
 | --- | --- |
-| ![One graph per logical processor](docs/screenshots/win10-dark-performance-cores.png) | ![Memory view in the Windows 11 design](docs/screenshots/win11-dark-performance.png) |
-| One graph per logical processor ("Logical processors") | Memory usage |
-| ![GPU view](docs/screenshots/win10-dark-gpu.png) | ![Settings in the Windows 11 design](docs/screenshots/win11-dark-settings.png) |
-| GPU engines, dedicated and shared GPU memory | Settings: language, design, color scheme, refresh rates, remote server |
-| ![Network view](docs/screenshots/win10-dark-network.png) | |
-| Network throughput, receive (solid) and send (dashed), auto-scaled | |
+| ![Process list in the Windows 11 design](docs/screenshots/win11-light-processes.png) | ![Process list in the Windows 10 design](docs/screenshots/win10-dark-processes.png) |
+| Process list with heat map, grouped into apps and background processes | The same list in the Windows 10 design |
 
-| More tabs | |
+![History of CPU, memory, disks and network](docs/screenshots/win10-dark-history.png)
+
+**History**: CPU, memory, swap, disks, network, temperatures and GPU, kept for up to a year.
+
+**More tabs**
+
+| | |
 | --- | --- |
-| ![Services](docs/screenshots/win10-light-services.png) | ![Docker](docs/screenshots/win11-dark-docker.png) |
-| **Services**: all systemd services with description and status | **Docker**: containers with live CPU, memory and GPU usage (example containers) |
-| ![Autostart](docs/screenshots/win11-light-autostart.png) | ![Benchmarks](docs/screenshots/win10-dark-benchmarks.png) |
-| **Autostart**: user and system autostart entries, enable/disable | **Benchmarks**: CPU, memory, GPU and disk results |
-| ![Sensors](docs/screenshots/win10-dark-sensors.png) | |
-| **Sensors**: every hardware sensor the kernel exposes | |
+| ![Sensors](docs/screenshots/win11-dark-sensors.png) | ![Services](docs/screenshots/win10-light-services.png) |
+| **Sensors**: every hardware sensor the kernel exposes | **Services**: all systemd services with description and status |
+| ![Docker](docs/screenshots/win11-dark-docker.png) | ![Autostart](docs/screenshots/win11-light-autostart.png) |
+| **Docker**: containers with live CPU, memory and GPU usage | **Autostart**: user and system autostart entries, enable/disable |
+| ![Benchmarks](docs/screenshots/win10-light-benchmarks.png) | ![Settings](docs/screenshots/win11-dark-settings.png) |
+| **Benchmarks**: CPU, memory, GPU and disk results | **Settings**: language, design, color scheme, refresh rates, remote server |
 
-**Color schemes** (here: Dracula, Nord, Catppuccin Latte, Tokyo Night in the Windows 11 design):
+**Color schemes**: all 11 schemes in the Windows 11 design:
 
-![Four color schemes side by side](docs/screenshots/color-schemes.png)
+![All eleven color schemes side by side](docs/screenshots/color-schemes.png)
 
 ## Features at a glance
 
@@ -73,12 +124,14 @@ different today.
   headers, search, end task, run new task and drag & drop to start programs.
 - **History** of CPU, memory, swap, disks, network, temperatures and GPU, kept for up to a
   year in a small local file. Also shows the history of a server in remote mode.
-- **Performance** graphs for CPU (overall or per logical processor, laid out like on
-  Windows), memory, every physical disk, network (auto-scaled, send/receive) and every
+- **Performance** graphs for CPU (overall, per logical processor or per CCD), memory, every physical disk, network (auto-scaled, send/receive) and every
   GPU (selectable engines, dedicated and shared memory).
 - **Memory** under Performance with one graph for RAM and swap and a plain rating of
   whether memory is actually tight. A data view lists everything else: kernel figures,
   swap devices, every module and the module temperatures.
+- **CCD view** for AMD Ryzen, Threadripper and EPYC: temperature, load, clock and
+  power draw of every CCD, and the per-thread graphs grouped by CCD and socket
+  ([details](#cpu-and-ccd-view)).
 - **Every GPU is detected**: AMD, NVIDIA and Intel (including Arc), also on systems with
   several GPUs. Multi-socket boards show each CPU separately.
 - **Detailed hardware data**: CPU temperature and frequency, RAM speed and module
@@ -154,7 +207,8 @@ without typing your password every time. (The .deb already ships the helper as
 `/usr/libexec/lintask/lintask-smartctl` and the Arch package as
 `/usr/lib/lintask/lintask-smartctl`; the button then only adds
 the sudo rule and the udev rule.) The helper can only run `smartctl` on
-block devices and `dmidecode -t memory`, move the memory of *your own* processes to
+block devices and `dmidecode -t memory`, read the per-core energy counters of AMD CPUs (for the
+power draw of each CCD), move the memory of *your own* processes to
 swap, and empty the page cache; the last two only happen when you ask for them in the
 process list or the memory view. The button also makes the CPU energy counters
 (RAPL, `/sys/class/powercap/intel-rapl*:*/energy_uj`, on Intel and AMD) readable
@@ -813,13 +867,18 @@ to turn that off.
 
 The left column shows a small live graph for every device; click one to see details.
 
-- **CPU**: utilization graph for the last 60 seconds. **Per core**, or right-click the
-  graph → **Change graph to** → *Overall utilization* / *Logical processors*, switches to
-  one graph per logical processor; the choice is remembered. With few threads the grid
-  is laid out like on Windows. Below: utilization, speed, temperature, processes,
-  uptime, cores, logical processors and power draw (if the kernel provides it). Boards
-  with several CPUs also show *Sockets* and the *Highest temperature*, and list each
-  CPU separately.
+- **CPU**: utilization graph for the last 60 seconds. Right-click the graph →
+  **Change graph to** → *Overall utilization* / *Logical processors* / *CCDs* switches
+  between one graph for the whole CPU, one per logical processor and one per CCD
+  (*CCDs* only on CPUs with several); **Per core** toggles the first two. The choice is
+  remembered. With few threads and one CCD the grid is laid out like
+  on Windows; on CPUs with several CCDs each CCD fills rows of its own, separated by a
+  thicker line (and sockets by a thick one). Below: utilization, speed, temperature,
+  processes, uptime, cores, logical processors and power draw (if the kernel provides
+  it), and on CPUs with several CCDs one line per CCD with its temperature, load, clock
+  and (after the hardware data setup) power draw. Boards with several CPUs also show
+  *Sockets* and the *Highest temperature*, and list each CPU separately. See
+  [CPU and CCD view](#cpu-and-ccd-view).
 - **Memory**: RAM as a solid line and swap as a dashed line in one graph, like receive
   and send under Network. Which program holds how much is in the
   [Processes](#processes) tab, in the *RAM* and *Swap* columns.
@@ -943,7 +1002,7 @@ Benchmarks, History) and the row is selected first, then a menu shows:
 
 On the **Performance** page right-click a device on the left to copy its values and
 details as plain text; on the CPU entry and the CPU graph the menu also switches between
-overall utilization and logical processors.
+overall utilization, logical processors and CCDs.
 
 ## Design and color schemes
 
@@ -1179,6 +1238,13 @@ than guessed.
   whole-platform `psys` zone is skipped so nothing is counted twice. RAPL is
   root-only since Linux 5.10; **Set up hardware data with sudo** makes it
   readable for your user group. In a virtual machine there is usually no sensor.
+- **CCDs** are read from the CPU topology (CPUs that share an L3 cache) and need no
+  setup. The CCD temperature (`Tccd1`, `Tccd2`, …) comes from the `k10temp` driver;
+  older Zen CPUs and some mobile chips do not report it, then only load and clock are
+  shown. The **power draw per CCD** is added up from the energy counter of every core
+  (AMD only, MSR `0xC001029A`), which only root can read, so it appears after
+  **Set up hardware data with sudo**; the helper then streams one sample a second
+  through a single sudo call. In a virtual machine there is usually no counter.
 - **GPU** metrics use `nvidia-smi` for NVIDIA hardware and the Linux DRM/sysfs
   interface for AMD, Intel, and Nouveau drivers. Which engines are available depends
   on the driver. AMD model names come from libdrm's `amdgpu.ids` (device ID and
