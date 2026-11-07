@@ -2,6 +2,7 @@
 (tabs across the top, status bar with process/thread counts, switchable light/dark theme)."""
 from __future__ import annotations
 
+import gc
 import re
 from pathlib import Path
 from string import Template
@@ -14,6 +15,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QMainWindow,
     QMenuBar,
+    QMessageBox,
     QPushButton,
     QScrollArea,
     QStatusBar,
@@ -24,7 +26,7 @@ from PySide6.QtWidgets import (
 from app.history import HistoryService
 from app.i18n import set_language, tr
 from app.settings import Settings
-from app import window_on_top
+from app import login_autostart, tray, window_on_top
 from pages.autostart_page import AutostartPage
 from pages.benchmarks_page import BenchmarksPage
 from pages.docker_page import DockerPage
@@ -818,22 +820,46 @@ QPushButton:checked {{
 """
 
 
+# Everything _build_ui creates that holds data; dropped while Lintask sits in the panel.
+_UI_ATTRIBUTES = (
+    "tabs", "processes_page", "memory_page", "performance_page", "history_page",
+    "sensors_page", "services_page", "docker_page", "autostart_page", "benchmarks_page",
+    "settings_page", "page_frames", "status_label",
+)
+
+
 class MainWindow(QMainWindow):
-    def __init__(self):
+    def __init__(self, start_in_tray: bool = False):
         QApplication.setStyle("Fusion")
         super().__init__()
         self.setMinimumSize(_MIN_WIDTH, _MIN_HEIGHT)
 
         self.settings = Settings()
         set_language(self.settings.language)
-        # Outside _build_ui: recording goes on while a language change rebuilds the pages.
+        # Outside _build_ui: recording goes on while a language change rebuilds the pages
+        # and while Lintask sits in the panel without any page.
         self.history = HistoryService(recording=self.settings.history_enabled)
+        self._tray: tray.TrayIcon | None = None
+        self._ui_built = False
+        self._quitting = False
+        self._shut_down = False
+        self._page_before_tray = self.settings.default_page
+        # A logout ends the event loop without a closeEvent while the window is hidden.
+        QApplication.instance().aboutToQuit.connect(self._final_shutdown)
 
+        self.started_in_tray = start_in_tray and tray.tray_available()
+        if self.started_in_tray:
+            self._restore_size()
+            self._tray_icon().start()
+            return
         self._build_ui()
+        self._ui_built = True
         self._restore_size()
         self.tabs.setCurrentWidget(self._frame_for(self.settings.default_page))
         if self.settings.always_on_top:
             window_on_top.set_always_on_top(self, True)
+        if self.settings.close_to_tray and tray.tray_available():
+            self._tray_icon().start()
 
     def _build_ui(self) -> None:
         """Creates everything that shows text; runs again when the language changes."""
@@ -912,6 +938,8 @@ class MainWindow(QMainWindow):
         )
         self.settings_page.customQssChanged.connect(self._apply_custom_qss)
         self.settings_page.alwaysOnTopChanged.connect(self._set_always_on_top)
+        self.settings_page.closeToTrayChanged.connect(self._set_close_to_tray)
+        self.settings_page.loginAutostartChanged.connect(self._set_login_autostart)
         self.settings_page.defaultPageChanged.connect(self._sync_default_page_actions)
         self.settings_page.remoteConnectionChanged.connect(
             self.performance_page.set_remote_connection
@@ -950,12 +978,83 @@ class MainWindow(QMainWindow):
     def _switch_language(self, language: str) -> None:
         """Rebuilds all pages, menus and the status bar in the new language."""
         set_language(language)
+        self._tear_down_ui()
+        self._build_ui()
+        self._ui_built = True
+        self.tabs.setCurrentWidget(self.page_frames[-1])
+        if self._tray is not None:
+            self._tray.retranslate()
+
+    def _tear_down_ui(self) -> None:
+        """Stops every page and drops everything _build_ui created."""
         self.tabs.currentChanged.disconnect(self._on_tab_changed)
         self._shut_down_pages()
+        self.setCentralWidget(QWidget())
         self.setMenuBar(QMenuBar())
         self.setStatusBar(QStatusBar())
-        self._build_ui()
-        self.tabs.setCurrentWidget(self.page_frames[-1])
+        self._ui_built = False
+
+    # --- Panel (system tray) ---
+
+    def _tray_icon(self) -> tray.TrayIcon:
+        if self._tray is None:
+            # The hidden window must not count as the last one closed.
+            QApplication.setQuitOnLastWindowClosed(False)
+            self._tray = tray.TrayIcon(self.history, self)
+            self._tray.openRequested.connect(self._toggle_from_tray)
+            self._tray.quitRequested.connect(self.quit_app)
+        return self._tray
+
+    def _toggle_from_tray(self) -> None:
+        if self._ui_built and self.isVisible():
+            self.hide_to_tray()
+        else:
+            self.show_from_tray()
+
+    def hide_to_tray(self) -> None:
+        """Hides the window and frees every page; only the history recorder keeps running."""
+        if not self._ui_built or not tray.tray_available():
+            return
+        self.settings.window_geometry = self.saveGeometry()
+        self._page_before_tray = getattr(self.tabs.currentWidget(), "page_key",
+                                         self.settings.default_page)
+        self._tray_icon().start()
+        self.hide()
+        window_on_top.release()
+        # Deferred: this can run from an action of the menu bar that is being replaced.
+        QTimer.singleShot(0, self._free_hidden_ui)
+
+    def _free_hidden_ui(self) -> None:
+        if not self._ui_built or self.isVisible():
+            return
+        self._tear_down_ui()
+        for name in _UI_ATTRIBUTES:
+            setattr(self, name, None)
+        gc.collect()
+
+    def show_from_tray(self) -> None:
+        if not self._ui_built:
+            self._build_ui()
+            self._ui_built = True
+            self.tabs.setCurrentWidget(self._frame_for(self._page_before_tray))
+            self._restore_size()
+        self.showNormal()
+        self.raise_()
+        self.activateWindow()
+        if self.settings.always_on_top:
+            window_on_top.set_always_on_top(self, True)
+        if self._tray is not None and not self.settings.close_to_tray:
+            self._tray.stop()
+
+    def quit_app(self) -> None:
+        """Ends Lintask, also when closing would only hide it in the panel."""
+        self._quitting = True
+        if self.isVisible():
+            # Deferred like hide_to_tray: the menu bar goes away while closing.
+            QTimer.singleShot(0, self.close)
+        else:
+            self._final_shutdown()
+            QApplication.quit()
 
     def _build_menu(self) -> None:
         """File / Options / View, like the Windows 10 Task Manager."""
@@ -965,13 +1064,25 @@ class MainWindow(QMainWindow):
         file_menu.addAction(tr("&Run new task"), self.processes_page.run_new_task)
         file_menu.addAction(tr("&Start file…"), self.processes_page.choose_and_start_file)
         file_menu.addSeparator()
-        file_menu.addAction(tr("E&xit"), self.close)
+        hide_action = file_menu.addAction(tr("&Hide in panel"), self.hide_to_tray)
+        hide_action.setEnabled(tray.tray_available())
+        file_menu.addAction(tr("E&xit"), self.quit_app)
 
         options_menu = menu_bar.addMenu(tr("&Options"))
         self._on_top_action = options_menu.addAction(tr("&Always on top"))
         self._on_top_action.setCheckable(True)
         self._on_top_action.setChecked(self.settings.always_on_top)
         self._on_top_action.toggled.connect(self._set_always_on_top)
+        self._close_to_tray_action = options_menu.addAction(tr("Keep running in the &panel"))
+        self._close_to_tray_action.setCheckable(True)
+        self._close_to_tray_action.setChecked(self.settings.close_to_tray)
+        self._close_to_tray_action.setEnabled(tray.tray_available())
+        self._close_to_tray_action.toggled.connect(self._set_close_to_tray)
+        self._login_autostart_action = options_menu.addAction(tr("Start in the panel at &login"))
+        self._login_autostart_action.setCheckable(True)
+        self._login_autostart_action.setChecked(login_autostart.is_enabled())
+        self._login_autostart_action.setEnabled(tray.tray_available())
+        self._login_autostart_action.toggled.connect(self._set_login_autostart)
         options_menu.addSeparator()
         default_menu = options_menu.addMenu(tr("Set &default tab"))
         self._default_page_actions: dict[str, QAction] = {}
@@ -1028,6 +1139,33 @@ class MainWindow(QMainWindow):
             widget.setChecked(enabled)
             widget.blockSignals(False)
         window_on_top.set_always_on_top(self, enabled)
+
+    def _set_close_to_tray(self, enabled: bool) -> None:
+        """Shared by the Options menu and the settings page; keeps both in step."""
+        self.settings.close_to_tray = enabled
+        for widget in (self._close_to_tray_action, self.settings_page.close_to_tray_check):
+            widget.blockSignals(True)
+            widget.setChecked(enabled)
+            widget.blockSignals(False)
+        if enabled and tray.tray_available():
+            self._tray_icon().start()
+        elif not enabled and self._tray is not None:
+            self._tray.stop()
+
+    def _set_login_autostart(self, enabled: bool) -> None:
+        """Shared by the Options menu and the settings page; the autostart file is the state."""
+        ok, error = login_autostart.set_enabled(enabled)
+        if not ok:
+            QMessageBox.warning(self, tr("Start in the panel at login"),
+                                tr("Could not change the autostart entry: {error}", error=tr(error)))
+        enabled = login_autostart.is_enabled()
+        for widget in (self._login_autostart_action, self.settings_page.login_autostart_check):
+            widget.blockSignals(True)
+            widget.setChecked(enabled)
+            widget.blockSignals(False)
+        if ok and enabled and not self.settings.close_to_tray:
+            # Started in the panel, Lintask should go back there when its window is closed.
+            self._set_close_to_tray(True)
 
     def _choose_default_page(self, key: str) -> None:
         combo = self.settings_page.default_page_combo
@@ -1110,11 +1248,27 @@ class MainWindow(QMainWindow):
         self.resize(max(width, _MIN_WIDTH), max(height, _MIN_HEIGHT))
 
     def closeEvent(self, event) -> None:  # noqa: N802 (Qt override)
-        self.settings.window_geometry = self.saveGeometry()
-        self._shut_down_pages()
+        if not self._quitting and self.settings.close_to_tray and tray.tray_available():
+            event.ignore()
+            self.hide_to_tray()
+            return
+        self._final_shutdown()
+        super().closeEvent(event)
+        if self._tray is not None:
+            # Quitting on the last closed window is off while the panel icon exists.
+            QApplication.quit()
+
+    def _final_shutdown(self) -> None:
+        if self._shut_down:
+            return
+        self._shut_down = True
+        if self._ui_built:
+            self.settings.window_geometry = self.saveGeometry()
+            self._shut_down_pages()
+        if self._tray is not None:
+            self._tray.stop()
         window_on_top.release()
         self.history.shutdown()
-        super().closeEvent(event)
 
     def _shut_down_pages(self) -> None:
         self.processes_page.shutdown()

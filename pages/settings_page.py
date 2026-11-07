@@ -26,7 +26,7 @@ from PySide6.QtWidgets import (
 
 from app.hardware_setup import setup_script, terminal_command
 from app.i18n import N_, tr
-from app import ui_scale
+from app import login_autostart, tray, ui_scale
 from app.settings import Settings
 from app.themes import SCHEMES
 
@@ -92,6 +92,8 @@ class SettingsPage(QWidget):
     customQssChanged = Signal(str)
     remoteConnectionChanged = Signal(bool, str, int, str)
     alwaysOnTopChanged = Signal(bool)
+    closeToTrayChanged = Signal(bool)
+    loginAutostartChanged = Signal(bool)
     defaultPageChanged = Signal(str)
 
     def __init__(self, settings: Settings, parent=None):
@@ -146,6 +148,22 @@ class SettingsPage(QWidget):
         window_form = QFormLayout(window_box)
         window_form.addRow(tr("Default start page:"), self.default_page_combo)
         window_form.addRow(self.always_on_top_check)
+        self.close_to_tray_check = QCheckBox(tr("Keep running in the panel when closed"))
+        self.close_to_tray_check.setChecked(settings.close_to_tray)
+        self.close_to_tray_check.setToolTip(tr(
+            "Closing the window leaves an icon in the panel. Only the history keeps "
+            "recording there; every page is stopped until you open Lintask again."))
+        self.close_to_tray_check.setEnabled(tray.tray_available())
+        self.close_to_tray_check.toggled.connect(self._on_close_to_tray_toggled)
+        window_form.addRow(self.close_to_tray_check)
+        self.login_autostart_check = QCheckBox(tr("Start in the panel at login"))
+        self.login_autostart_check.setChecked(login_autostart.is_enabled())
+        self.login_autostart_check.setToolTip(tr(
+            "Adds Lintask to your autostart. After login only the panel icon starts, so "
+            "the history is recorded from the beginning."))
+        self.login_autostart_check.setEnabled(tray.tray_available())
+        self.login_autostart_check.toggled.connect(self.loginAutostartChanged.emit)
+        window_form.addRow(self.login_autostart_check)
 
         speed_box = QGroupBox(tr("Refresh rate"))
         self.process_spin = QSpinBox()
@@ -274,6 +292,9 @@ class SettingsPage(QWidget):
     def _on_always_on_top_toggled(self, enabled: bool) -> None:
         self.settings.always_on_top = enabled
         self.alwaysOnTopChanged.emit(enabled)
+
+    def _on_close_to_tray_toggled(self, enabled: bool) -> None:
+        self.closeToTrayChanged.emit(enabled)
 
     def _on_process_interval_changed(self, value: int) -> None:
         self.settings.process_interval_ms = value

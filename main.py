@@ -47,8 +47,10 @@ def main() -> int:
     app.setApplicationName("Lintask")
     # Matches lintask.desktop so the panel shows the right icon/name.
     app.setDesktopFileName("lintask")
-    window = MainWindow()
-    window.show()
+    # --tray starts with only the panel icon, e.g. from a desktop autostart entry.
+    window = MainWindow(start_in_tray="--tray" in sys.argv[1:])
+    if not window.started_in_tray:
+        window.show()
     return app.exec()
 
 

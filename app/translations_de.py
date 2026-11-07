@@ -417,4 +417,26 @@ GERMAN = {
     "Automatic (screen resolution)": "Automatisch (Bildschirmauflösung)",
     "Takes effect after Lintask is restarted.": "Wirkt nach einem Neustart von Lintask.",
     "UI size:": "Oberflächengröße:",
+    "Open Lintask": "Lintask öffnen",
+    "Exit": "Beenden",
+    "CPU: {value} %": "CPU: {value} %",
+    "Memory: {value} %": "Arbeitsspeicher: {value} %",
+    "&Hide in panel": "In der Leiste &ausblenden",
+    "Keep running in the &panel": "In der &Leiste weiterlaufen",
+    "Keep running in the panel when closed": "Beim Schließen in der Leiste weiterlaufen",
+    "Closing the window leaves an icon in the panel. Only the history keeps "
+    "recording there; every page is stopped until you open Lintask again.":
+        "Beim Schließen bleibt ein Symbol in der Leiste. Dort zeichnet nur der Verlauf "
+        "weiter auf; alle Seiten ruhen, bis du Lintask wieder öffnest.",
+    "Start in the panel at login": "Beim Anmelden in der Leiste starten",
+    "Start in the panel at &login": "Beim Anmelden in der Leiste &starten",
+    "Adds Lintask to your autostart. After login only the panel icon starts, so "
+    "the history is recorded from the beginning.":
+        "Trägt Lintask in deinen Autostart ein. Nach der Anmeldung startet nur das Symbol "
+        "in der Leiste, so wird der Verlauf von Anfang an aufgezeichnet.",
+    "Start Lintask in the panel and keep recording the history":
+        "Lintask in der Leiste starten und den Verlauf weiter aufzeichnen",
+    "Could not change the autostart entry": "Der Autostart-Eintrag konnte nicht geändert werden",
+    "Could not change the autostart entry: {error}":
+        "Der Autostart-Eintrag konnte nicht geändert werden: {error}",
 }

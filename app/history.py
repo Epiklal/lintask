@@ -291,6 +291,8 @@ class HistoryRecorder(threading.Thread):
         self._sampler = sampler or MetricSampler()
         self._interval = interval
         self._stop_event = threading.Event()
+        # The last sample, for the panel icon: it shows this instead of measuring again.
+        self.latest: dict | None = None
 
     def run(self) -> None:
         reported = False
@@ -298,6 +300,7 @@ class HistoryRecorder(threading.Thread):
             try:
                 values = self._sampler.sample()
                 if values is not None:
+                    self.latest = values
                     self._store.record(values)
                 reported = False
             except Exception as error:  # a sensor or the disk: the next sample may work
@@ -337,6 +340,10 @@ class HistoryService:
     @property
     def recording(self) -> bool:
         return self._recorder is not None
+
+    @property
+    def latest(self) -> dict | None:
+        return self._recorder.latest if self._recorder is not None else None
 
     def set_recording(self, enabled: bool) -> None:
         if enabled and self._recorder is None and self.store is not None:

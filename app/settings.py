@@ -128,6 +128,14 @@ class Settings:
         self._store.setValue("always_on_top", value)
 
     @property
+    def close_to_tray(self) -> bool:
+        return self._store.value("close_to_tray", False, type=bool)
+
+    @close_to_tray.setter
+    def close_to_tray(self, value: bool) -> None:
+        self._store.setValue("close_to_tray", value)
+
+    @property
     def default_page(self) -> str:
         """Key of the page shown at start, like Windows' "Set default tab"."""
         return self._store.value("default_page", "processes", type=str)
